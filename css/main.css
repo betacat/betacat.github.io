@@ -102,7 +102,11 @@ a:hover   { color: #F72105; text-decoration: underline; }
 /*     text-indent: 1cm */
 /* } */
 pre {
-  overflow-x: scroll;
+  _width: 95%; /*IE6 定宽*/
+  *padding-bottom: 14px;  /* XP下滚动条高度约14px */
+  *overflow-y: hidden;    /* 隐藏纵向滚动条 */
+
+  overflow-x: auto;
 }
 
 .post pre {
