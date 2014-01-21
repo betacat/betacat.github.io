@@ -1,0 +1,22 @@
+---
+layout: default
+---
+
+<!-- <br/> -->
+
+<h2>{{ page.title }}</h2>
+<p class="meta">{{ page.date | date:"%Y-%m-%d" }}</p>
+
+<div class="post">
+
+{% include toc.html %}
+<div class="dashed-line"></div>
+
+{{ content }}
+
+<br/>
+<hr/>
+<br/>
+
+{% include disqus_comment.html  %}
+</div>

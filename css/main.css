@@ -1,0 +1,188 @@
+/*****************************************************************************/
+/*
+/* Common
+/*
+/*****************************************************************************/
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #FFF;
+  font-family: consolas, menlo, "Courier New", /*"Kaiti SC", */"Hiragino Sans GB", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-size: 120%; }
+
+a         { color: #00a; text-decoration: none; }
+a:visited { color: #a0a; text-decoration: none; }
+a:hover   { color: #F72105; text-decoration: underline; }
+
+/*****************************************************************************/
+/*
+/* Home
+/*
+/*****************************************************************************/
+.posts {
+  list-style-type: none;
+  margin-bottom: 2em;
+}
+
+.posts li {
+  line-height: 1.75em;
+}
+
+.posts span {
+  color: #aaa;
+  font-family: Monaco, "Courier New", monospace;
+  font-size: 80%;
+}
+
+/*****************************************************************************/
+/*
+/* Site
+/*
+/*****************************************************************************/
+
+.site {
+  font-size: 115%;
+  width: 90%;
+  margin: auto;
+  margin-top: 2em;
+}
+
+.header a {
+  text-decoration: none;
+}
+
+.title {
+  font-size: 180%;
+}
+
+.title a {
+  color: #a00;
+}
+
+.title a:hover {
+  color: #000;
+}
+
+.header a.extra {
+  color: #aaa;
+  margin-left: 1em;
+}
+
+.header a.extra:hover {
+  color: #000;
+}
+
+.meta {
+  color: #aaa;
+}
+
+.footer {
+  font-size: 80%;
+  color: #666;
+  border-top: 4px solid #eee;
+  margin-top: 2em;
+  overflow: hidden;
+}
+
+.to_top {
+    float: right;
+}
+/*****************************************************************************/
+/*
+/* Posts
+/*
+/*****************************************************************************/
+
+/* standard */
+/* .post { */
+/*     text-indent: 1cm */
+/* } */
+
+.post pre {
+  border: 0.1em solid #ddd;
+  background-color: #eef;
+  padding: 0 .4em;
+}
+
+.post ul, .post ol {
+  margin-left: 1.35em;
+}
+
+.post code {
+  border: 0.1em solid #ddd;
+  background-color: #eef;
+  padding: 0 .2em;
+}
+
+.post pre code {
+  font-family: consolas, "Courier New", /*"Kaiti SC", */"Hiragino Sans GB", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  /* font-family: consolas, monospace, "Courier New", "Kaiti SC", KaiTi, "Microsoft YaHei"; */
+  border: none;
+}
+
+/* terminal */
+.post pre.terminal {
+  border: 0.1px solid #000;
+  background-color: #333;
+  color: #FFF;
+}
+
+.post pre.terminal code {
+  background-color: #333;
+}
+
+/*****************************************************************************/
+/*
+/* link
+/*
+/*****************************************************************************/
+.link {
+  list-style: none;
+}
+
+.link li {
+  display: inline-block;
+}
+
+/*****************************************************************************/
+/*
+/* category
+/*
+/*****************************************************************************/
+.category {
+  border-bottom: 0.1em solid gray;
+  padding: 0;
+}
+
+.category ul {
+  list-style: none;
+}
+
+.category li {
+  display: inline-block;
+}
+
+
+/*****************************************************************************/
+/*
+/* quote
+/*
+/*****************************************************************************/
+
+blockquote{
+  background: #f4f4f4 url(/images/blockquote.png) 0.4em 0.2em no-repeat;
+  padding-left: 2em;
+  padding-right: 2em;
+  margin-left: 2em; 
+}
+
+
+/* dasshed line */
+.dashed-line {
+  border-top: 0.1em dashed #cccccc;
+  overflow: hidden
+}

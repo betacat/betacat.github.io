@@ -1,0 +1,14 @@
+name:           Boxcounter的烂笔头
+description:    Boxcounter的烂笔头
+email:          ns.boxcounter@gmail.com
+url_root:       http://betacat.github.io/
+markdown:       redcarpet
+redcarpet:
+  extensions: ["tables","with_toc_data", "no_intra_emphasis", "fenced_code_blocks", "autolink", "strikethrough", "superscript"]
+pygments:       true
+safe:           true
+permalink:      /:year/:month/:day/:title
+author:         Boxcounter
+author_email:   ns.boxcounter@gmail.com
+encoding:       UTF-8
+disqus_id:      boxcounter

@@ -1,0 +1,1651 @@
+---
+layout: post
+title:  "SEH分析笔记（X64篇）"
+date:   2011-11-04
+category: tech
+---
+
+[不介意转载，但请注明出处 www.boxcounter.com  
+附件里有本文的原始稿，一样的内容，更好的高亮和排版。  
+本文的部分代码可能会因为论坛的自动换行变得很乱，需要的朋友手动复制到自己的代码编辑器就可以正常显示了]
+
+
+# 一、前言 #
+
+　　在之前的《SEH分析笔记（X86篇）》中，我借助wrk1.2介绍了x86下windows系统内核中的SEH实现。这次我们来看看x64位windows系统内核中SEH的实现。  
+
+　　本文需要大家熟悉x64位系统的一些特性，比如调用约定、Prolog和Epilog。可以通过这几篇文章熟悉一下:  
+
+   * Overview of x64 Calling Conventions, MSDN
+   * The history of calling conventions, part 5: amd64 , The Old New Thing
+   * Everything You Need To Know To Start Programming 64-Bit Windows Systems, Matt Pietrek
+
+　　首先回顾一下前一篇文章。  
+　　在x86windows中，函数通过以下几个步骤来参与SEH ：  
+
+   1. 在自身的栈空间中分配并初始化一个EXCEPTION\_REGISTRATION(\_RECORD)结构体。  
+   2. 将该EXCEPTION\_REGISTRATION(\_RECORD)挂入当前线程的异常链表。
+
+　　当某函数触发异常时，系统首先会通过调用KiDispatchException来给内核调试器一个机会，如果内核调试器没有处理该异常，则该机会被转给RtlDispatchException，这个函数就开始分发该异常。分发过程为：
+
+　　从当前线程的异常链表头开始遍历，对于每一个SEH注册信息（即EXCEPTION\_REGISTRATION(\_RECORD)），调用其Handler。根据Handler的返回值做相应的后续处理：
+
+   * 返回ExceptionContinueExecution，表示Handler已经修复了异常触发点，从异常触发点继续执行。
+   * 返回ExceptionContinueSearch，表示该Handler没有处理该异常，继续遍历异常链表。
+   * Handler没有修复异常触发点，但是却能处理该异常（某个\_\_except过滤代码返回EXCEPTION\_EXECUTE\_HANDLER）。这种情况下，处理完该异常后就从异常解决代码（\_\_except代码块）继续执行，Handler不会返回。
+
+　　以上是简略的x86SEH流程，其中省略了很多细节，比如展开、错误处理、ExceptionNestedException和ExceptionCollidedUnwind等等。  
+　　之所以在这里重温这个流程，是因为x64中SEH的流程总体思路也是如此，只是细节上做了一些修改。但这并不表示熟悉x86SEH就能很轻松的掌握x64SEH。
+
+　　本文分为四个部分：“异常注册”、“异常分发”、“展开、解决”和“ExceptionNestedException和ExceptionCollidedUnwind”。依然以MSC的增强版为分析对象。分析环境为：WDK 7600.16385.1，内置的cl的版本是15.00.30729.207，link的版本是9.00.30729.207，测试虚拟机系统为amd64 WinXP+wrk1.2。
+
+　　在讲述之前，需要先定义几个名词，以简化后续的讲述。  
+　　RVA —— 熟悉PE格式的朋友都懂的，表示某个绝对地址相对于所在模块的基地址的偏移。  
+　　EXCEPT\_POINT —— 异常触发点。  
+　　EXCEPT\_FILTER —— \_\_except小括号内的异常过滤代码。  
+　　EXCEPT\_HANDLER —— \_\_except大括号内的异常解决代码。  
+　　FINALLY\_HANDLER —— \_\_finally大括号内的代码。
+
+　　以下面的伪码为例，  
+{% highlight c++ %}
+ 1 __try
+ 2 {
+ 3     __try
+ 4     {
+ 5          *((ULONG*)NULL) = 0;
+ 6     }
+ 7     __except((STATUS_INVALID_PARAMETER == GetExceptionCode()) ?
+ 8              EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER)
+ 9     {
+10         ...
+11     }
+12 }
+13 __finally
+14 {
+15     ...
+16 {
+{% endhighlight %}
+　　EXCEPT\_POINT指的是行5中的代码。  
+　　EXCEPT\_FILTER指的是行7和行8中\_\_except()括号中的三元表达式。  
+　　EXCEPT\_HANDLER指的是行9到行11中所有的代码。  
+　　FINALLY\_HANDLER指的是行14到行16中所有的代码。
+
+# 二、异常注册 #
+
+　　在x64 windows中，异常注册信息发生了巨大的改变。x86中异常注册信息是在函数执行过程中在栈中分配并初始化的。x64中变成这样：  
+　　异常注册信息不再是动态创建，而是编译过程中生成，链接时写入PE+头中的ExceptionDirectory（参考winnt.h中IMAGE\_RUNTIME\_FUNCTION_ENTRY的定义）。ExceptionDirectory里包含几乎所有函数的栈操作、异常处理等信息。
+
+　　来看看新异常注册信息的数据结构：  
+{% highlight c++ %}
+typedef struct _RUNTIME_FUNCTION {
+    ULONG BeginAddress;
+    ULONG EndAddress;
+    ULONG UnwindData;
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
+
+typedef enum _UNWIND_OP_CODES {
+    UWOP_PUSH_NONVOL = 0,
+    UWOP_ALLOC_LARGE,       // 1
+    UWOP_ALLOC_SMALL,       // 2
+    UWOP_SET_FPREG,         // 3
+    UWOP_SAVE_NONVOL,       // 4
+    UWOP_SAVE_NONVOL_FAR,   // 5
+    UWOP_SPARE_CODE1,       // 6
+    UWOP_SPARE_CODE2,       // 7
+    UWOP_SAVE_XMM128,       // 8
+    UWOP_SAVE_XMM128_FAR,   // 9
+    UWOP_PUSH_MACHFRAME     // 10
+} UNWIND_OP_CODES, *PUNWIND_OP_CODES;
+
+typedef union _UNWIND_CODE {
+    struct {
+        UCHAR CodeOffset;
+        UCHAR UnwindOp : 4;
+        UCHAR OpInfo : 4;
+    };
+
+    USHORT FrameOffset;
+} UNWIND_CODE, *PUNWIND_CODE;
+
+#define UNW_FLAG_NHANDLER 0x0
+#define UNW_FLAG_EHANDLER 0x1
+#define UNW_FLAG_UHANDLER 0x2
+#define UNW_FLAG_CHAININFO 0x4
+
+typedef struct _UNWIND_INFO {
+    UCHAR Version : 3;
+    UCHAR Flags : 5;
+    UCHAR SizeOfProlog;
+    UCHAR CountOfCodes;
+    UCHAR FrameRegister : 4;
+    UCHAR FrameOffset : 4;
+    UNWIND_CODE UnwindCode[1];
+
+//
+// The unwind codes are followed by an optional DWORD aligned field that
+// contains the exception handler address or a function table entry if
+// chained unwind information is specified. If an exception handler address
+// is specified, then it is followed by the language specified exception
+// handler data.
+//
+//  union {
+//      struct {
+//          ULONG ExceptionHandler;
+//          ULONG ExceptionData[];
+//      };
+//
+//      RUNTIME_FUNCTION FunctionEntry;
+//  };
+//
+
+} UNWIND_INFO, *PUNWIND_INFO;
+
+typedef struct _SCOPE_TABLE {
+    ULONG Count;
+    struct
+    {
+        ULONG BeginAddress;
+        ULONG EndAddress;
+        ULONG HandlerAddress;
+        ULONG JumpTarget;
+    } ScopeRecord[1];
+} SCOPE_TABLE, *PSCOPE_TABLE;
+{% endhighlight %}
+
+　　x64中，MSC为几乎所有的函数都登记了完备的信息，用来在展开过程中完整的回滚函数所做的栈、寄存器操作。登记的信息包括（但不仅仅是）：
+
+   * 函数是否使用了SEH
+   * 函数使用的是什么组合的SEH（\_\_try/\_\_except？\_\_try/\_\_finally？）
+   * 函数申请了多少栈空间
+   * 函数保存了哪些寄存器
+   * 函数是否建立了栈帧
+
+　　同时也记录了这些操作的顺序（以保证回滚的时候不会乱套）。这些信息就存储在UNWIND\_INFO之中。UNWIND\_INFO相当于x86下的EXCEPTION\_REGISTRATION。它的成员分别是：
+
+   * Version —— 结构体的版本。
+   * Flags —— 标志位，可以有这么几种取值：
+     * UNW\_FLAG\_NHANDLER (0x0): 表示既没有EXCEPT\_FILTER也没有EXCEPT\_HANDLER。
+     * UNW\_FLAG\_EHANDLER (0x1): 表示该函数有EXCEPT\_FILTER & EXCEPT\_HANDLER。
+     * UNW\_FLAG\_UHANDLER (0x2): 表示该函数有FINALLY\_HANDLER。
+     * UNW\_FLAG\_CHAININFO (0x4): 表示该函数有多个UNWIND\_INFO，它们串接在一起（所谓的chain）。
+   * SizeOfProlog —— 表示该函数的Prolog指令的大小，单位是Byte。
+   * CountOfCodes —— 表示当前UNWIND\_INFO包含多少个UNWIND\_CODE 结构。
+   * FrameRegister —— 如果函数建立了栈帧，它表示栈帧的索引（相对于 CONTEXT::RAX的偏移，详情参考RtlVirtualUnwind源码）。否则该成员的值为0。
+   * FrameOffset —— 表示FrameRegister距离函数最初栈顶（刚进入函数，还没有执行任何指令时的栈顶）的偏移，单位也是 byte。
+   * UnwindCode —— 是一个UNWIND\_CODE类型的数组。元素数量由CountOfCodes决定。
+
+　　需要说明几点：
+
+   1. 如果Flags设置了UNW\_FLAG\_EHANDLER或UNW\_FLAG\_UHANDLER，那么在最后一个UNWIND\_CODE之后存放着ExceptionHandler（相当于x86 EXCEPTION\_REGISTRATION::handler）和ExceptionData（相当于x86 EXCEPTION\_REGISTRATION::scopetable）。
+   2. UnwindCode数组详细记录了函数修改栈、保存非易失性寄存器的指令。
+   3. MSDN中有UNWIND\_INFO和UNWIND\_CODE的详细说明，推荐阅读。
+
+　　那UNWIND\_INFO是如何与其描述的函数关联起来的呢？答案是：通过一个RUNTIME\_FUNCTION结构体。  
+　　RUNTIME\_FUNCTION::BeginAddress同RUNTIME\_FUNCTION::EndAddress 一起以RVA形式描述了函数的范围。  
+　　RUNTIME\_FUNCTION::UnwindData就是UNWIND\_INFO了，它也是一个RVA值。
+
+　　PE+中的ExceptionDirectory中存放着所有函数的RUNTIME\_FUNCTION，按RUNTIME\_FUNCTION::BeginAddress升序排列。一旦触发异常，系统可以通过EXCEPT\_POINT的RVA在ExceptionDirectory中二分查找到RUNTIME\_FUNCTION，进而找到UNWIND\_INFO。
+
+　　前面有提到，MSC为**几乎**所有的函数都登记了完毕的信息，那是不是有一些特殊函数没有登记信息呢？  
+　　是的。x64新增了一个概念，叫做“叶函数”。熟悉数据结构的朋友可能第一时间就联想到“叶节点”。没错，“叶函数”的含义跟“叶节点”很类似，叶函数不会有子函数，也就是说它不会再​调用任何函数。另外x64对这个概念额外加了一些要求：不修改栈指针（比如分配栈空间）、没有使用SEH。总结下来就是：既不调用函数、又没有修改栈指针，也没有使用SEH的函数就叫做“叶函数”。  
+　　叶函数可以没有登记信息，原因很简单，它根本就没信息需要登记~
+
+　　还有一个SCOPE\_TABLE结构，熟悉x86 SEH的朋友应该很眼熟 :-)，它等同于x86 SEH中的REGISTRATIOIN\_RECORD::scopetable的类型。其成员有：
+
+   * Count —— 表示ScopeRecord数组的大小。
+   * ScopeRecord —— 等同于x86中的scopetable\_entry成员。其中，
+   * BeginAddress和EndAddress表示某个\_\_try保护域的范围。
+   * HandlerAddress和JumpTarget表示EXCEPTION\_FILTER、EXCEPT\_HANDLER和FINALLY\_HANDLER。具体对应情况为：
+
+　　对于\_\_try/\_\_except组合，HandlerAddress代表EXCEPT\_FILTER，JumpTarget代表EXCEPT\_HANDLER。  
+　　对于\_\_try/\_\_finally组合，HandlerAddress代表FINALLY\_HANDLER，JumpTarget等于0。  
+　　这四个域通常都是RVA，但当EXCEPT\_FILTER简单地返回或等于EXCEPTION\_EXECUTE\_HANDLER时，HandlerAddress可能直接等于EXCEPTION\_EXECUTE\_HANDLER，而不再是一个RVA。
+
+　　我们可以通过windbg中的.fnent命令来查看某个函数的异常注册信息。比如，
+
+     1 kd> .fnent passThrough!SehTest
+     2 Debugger function entry 00000000`00778210 for:
+     3 d:\workspace\code\mycode\r0\passthrough\passthrough.c(51)
+     4 (fffffadf`f140f020) PassThrough!SehTest | (fffffadf`f140f0c0) PassThrough!Caller2
+     5 Exact matches:
+     6 PassThrough!SehTest (void)
+     7
+     8 BeginAddress = 00000000`00001020
+     9 EndAddress = 00000000`000010b2
+    10 UnwindInfoAddress = 00000000`00002668
+    11
+    12 Unwind info at fffffadf`f1410668, 10 bytes
+    13 version 1, flags 1, prolog 4, codes 1
+    14 handler routine: PassThrough!_C_specific_handler (fffffadf`f140f4ce), data 3
+    15 00: offs 4, unwind op 2, op info 4	UWOP_ALLOC_SMALL.
+　　行8到行10描述的是RUNTIME\_FUNCTION。  
+　　行12到行15描述的是UNWIND\_INFO。  
+
+　　对于叶函数，输出是这样的，
+
+    kd> .fnent passthrough!LeafTest
+    No function entry for fffffadf`f240c080
+　　到这里，异常注册就讲完了，我们认识了相关的数据结构和定位方法。下面我们进入异常分发流程。
+
+
+# 二、异常分发 #
+
+　　x64异常分发过程使用的仍然是KiDispatchException、RtlDispatchException、RtlpExecuteHandlerForException等函数。其中，KiDispatchException 中有关内核异常部分的代码完全没有变化，这里我偷懒直接拷贝《SEH分析笔记（X86篇）》中的部分描述。  
+　　原型：  
+{% highlight c++ %}
+VOID
+KiDispatchException (
+    IN PEXCEPTION_RECORD ExceptionRecord,
+    IN PKEXCEPTION_FRAME ExceptionFrame,
+    IN PKTRAP_FRAME TrapFrame,
+    IN KPROCESSOR_MODE PreviousMode,
+    IN BOOLEAN FirstChance
+    );
+{% endhighlight %}
+　　对于内核异常，它的处理步骤如下：  
+　　如果FirstChance为TRUE，那么,
+
+   1. 首先将该异常传达给内核调试器（KD），如果KD处理了该异常，那么函数返回。
+   2. KD没有处理，调用RtlDispatchException进行异常分发。如果分发成功，RtlDispatchExcetpion返回TRUE，或者根本不返回。
+   3. RtlDispatchException分发失败，那么再给KD一次处理机会，如果还是没有处理，那么BUGCHECK。
+
+　　如果FirstChance为FALSE，那么将该异常传达给KD，如果KD没有处理，那么BUGCHECK。  
+　　它的源码实现位于 $WRK-v1.2\base\ntos\ke\amd64\exceptn.c:430。
+
+　　RtlDispatchException 发生了一些改变。
+
+　　从之前描述的异常注册信息的数据结构可以发现，x64中已经不存在异常注册链这个概念了（虽然\_NT\_TIB结构体中还保留了ExceptionList域）。那x64中RtlDispatchException是如何遍历异常注册信息的呢？前面虽然有提到如何通过EXCEPT\_POINT找到UNWIND\_INFO结构，但是假如这个UNWIND\_INFO没有处理该异常，如何继续遍历呢？
+
+　　在解答这个问题之前，我们先来认识一个新函数和相关的数据结构，
+
+{% highlight c++ %}
+#define UNWIND_HISTORY_TABLE_SIZE 12
+
+typedef struct _UNWIND_HISTORY_TABLE_ENTRY {
+        ULONG64 ImageBase;
+        PRUNTIME_FUNCTION FunctionEntry;
+} UNWIND_HISTORY_TABLE_ENTRY, *PUNWIND_HISTORY_TABLE_ENTRY;
+
+#define UNWIND_HISTORY_TABLE_NONE 0
+#define UNWIND_HISTORY_TABLE_GLOBAL 1
+#define UNWIND_HISTORY_TABLE_LOCAL 2
+
+typedef struct _UNWIND_HISTORY_TABLE {
+        ULONG Count;
+        UCHAR Search;
+        ULONG64 LowAddress;
+        ULONG64 HighAddress;
+        UNWIND_HISTORY_TABLE_ENTRY Entry[UNWIND_HISTORY_TABLE_SIZE];
+} UNWIND_HISTORY_TABLE, *PUNWIND_HISTORY_TABLE;
+
+PRUNTIME_FUNCTION
+RtlLookupFunctionEntry (
+    IN ULONG64 ControlPc,
+    OUT PULONG64 ImageBase,
+    IN OUT PUNWIND_HISTORY_TABLE HistoryTable OPTIONAL
+    );
+{% endhighlight %}
+
+　　RtlLookupFunctionEntry的功能是查找指定地址所在函数的RUNTIME\_FUNCTION和所在模块的基地址。它的参数分为为，
+
+   * ControlPc —— 需要查找的指令地址，
+   * ImageBase —— 返回的模块基地址，
+   * HistoryTable —— 用于加速查找。
+
+　　工作流程：  
+　　RtlLookupFunctionEntry 在搜索的过程会根据是否传入HistoryTable而采取不同的搜索方法：
+
+   * 如果传入HistoryTable，则根据 HistoryTable->Search 表示的搜索方式在表中进行搜索：
+   * 如果搜索方式为UNWIND\_HISTORY\_TABLE\_NONE，那么不在HistoryTable中进行搜索。
+   * 如果搜索方式为UNWIND\_HISTORY\_TABLE\_GLOBAL，则首先在全局表RtlpUnwindHistoryTable开始搜索，如果搜索到，则结束搜索，函数返回。否则再在HistoryTable中搜索。
+   * 如果搜索方式为UNWIND\_HISTORY\_TABLE\_LOCAL，那么在HistoryTable中搜索。
+   * 如果上述过程中没有搜索到需要的结果，那么找到模块基地址，从模块的PE+头结构中解析出RUNTIME\_FUNCTION。如果搜索方式为UNWIND\_HISTORY\_TABLE\_NONE，还会将解决加入到HistoryTable。
+
+　　之前的描述中RtlDispatchException定位EXCEPT\_POINT所对应的RUNTIME\_FUNCTION就是通过调用RtlLookupFunctionEntry实现的。  
+　　回到刚才的问题，如何推动遍历呢？为了解决这个问题，x64又引进了一个新函数。现在我们有请x64 SEH核心成员RtlVirtualUnwind登场~  
+　　先来看看它的原型：
+{% highlight c++ %}
+PEXCEPTION_ROUTINE
+RtlVirtualUnwind (
+    IN ULONG HandlerType,
+    IN ULONG64 ImageBase,
+    IN ULONG64 ControlPc,
+    IN PRUNTIME_FUNCTION FunctionEntry,
+    IN OUT PCONTEXT ContextRecord,
+    OUT PVOID *HandlerData,
+    OUT PULONG64 EstablisherFrame,
+    IN OUT PKNONVOLATILE_CONTEXT_POINTERS ContextPointers OPTIONAL
+    );
+{% endhighlight %}
+　　它的主要功能是：  
+　　根据传入的ControlPc和ContextRecord等参数虚拟（模拟）展开该函数，并返回该函数的一些信息，比如HandlerData（SCOPE\_TABLE）、EstablisherFrame（rsp或栈帧）。
+
+　　流程是：
+
+   1. 通过FunctionEntry和ImageBase找到UNWIND\_INFO。根据UNWIND\_INFO中记录的信息，查找EstablisherFrame（即栈帧或者rsp）。
+   2. 根据ControlPc分如下两种情况展开：
+      + ControlPc >= EpilogOffset，即ControlPc在Epilog之中。那么把剩余的Epilog指令模拟执行完毕即可。  
+        所谓模拟是指，如果下一条EpiLog指令是“sub rsp, 0x32”，那么将ContextRecord->rsp减去0x32。并不是真正执行sub指令。
+      + ControlPc < EpilogOffset，那么把Prolog反向模拟回滚一遍即可。  
+        所谓反向回滚是指，如果Prolog的指令是
+   
+            mov [RSP + 8], RCX
+            push R15
+            push R14
+            push R13
+         那么反向回滚就是
+   
+            pop ContextRecord->R13 ;
+            pop ContextRecord->R14
+            pop ContextRecord->R15
+            mov ContextRecord->RCX, [ContextRecord->RSP+8]
+         上述的pop操作实际上是从ContextRecord->Rsp指向的内存中取出值存入ContextRecord->Rx，然后ContextRecord->Rsp加上8。并不是真正执行pop。  
+         然后把ContextRecord->Rip修改为ControlPc所在函数的返回地址，即父函数中的某一处call的下一条指令。  
+         这样，ContextRecord就被恢复成父函数在调用ControlPc所在函数之后的状态了。
+   3. 如果HandlerType包含UNW\_FLAG\_EHANDLER或UNW\_FLAG\_UHANDLER，那么将UNWIND\_INFO::ExceptionData赋给传出参数HandlerData，并返回UNWIND\_INFO::ExceptionRoutine。
+
+　　对于MSC编译器生成的模块，UNWIND\_INFO::ExceptionRoutine一般指向nt!\_\_C\_specific\_handler。UNWIND\_INFO::ExceptionData指向ControlPc所在函数的SCOPE\_TABLE。
+
+　　RtlVirtualUnwind的实现源码位于$WRK-v1.2\base\ntos\rtl\amd64\exdsptch.c:1202。  
+　　RtlVirtualUnwind返回后，RtlDispatchException就可以根据ContextRecord->Rip找到父函数对应的RUNTIME\_FUNCTION，进而找到UNWIND\_INFO。就这样推动整个遍历过程。
+
+　　这是一般情况，对于没有UNWIND\_INFO的叶函数呢？  
+　　对于叶函数，RtlLookupFunctionEntry返回NULL，于是RtlDispatchException知道这是个叶函数，就找到该叶函数的父函数，从父函数继续遍历。也就是完全无视叶函数，因为叶函数对整个异常处理过程没有任何影响。
+
+　　RtlDispatchException调用UNWIND\_INFO::ExceptionHandler依然是通过RtlpExecuteHandlerForException，其函数原型没有变化：
+{% highlight c++ %}
+EXCEPTION_DISPOSITION
+RtlpExecuteHandlerForException (
+    IN PEXCEPTION_RECORD ExceptionRecord,
+    IN PVOID EstablisherFrame,
+    IN OUT PCONTEXT ContextRecord,
+    IN OUT PVOID DispatcherContext
+    );
+{% endhighlight %}
+　　该函数的实现源码位于$WRK-v1.2\base\ntos\rtl\amd64\xcptmisc.asm:84。  
+　　RtlpExecuteHandlerForException的逻辑较x86版本没什么大变化，内部注册了一个异常处理函数RtlpExceptionHandler。RtlpExceptionHandler相当于x86中的nt!ExecuteHandler2，其内部会返回ExceptionNestedException或ExceptionContinueSearch。它的实现源码位于$WRK-v1.2\base\ntos\rtl\amd64\xcptmisc.asm:26。  
+　　需要一提的是，最后一个参数DispatchContext的类型是DISPATCHER\_CONTEXT，相对于x86版本，它扩充了很多，
+{% highlight c++ %}
+typedef struct _DISPATCHER_CONTEXT {
+    ULONG64 ControlPc;
+    ULONG64 ImageBase;
+    PRUNTIME_FUNCTION FunctionEntry;
+    ULONG64 EstablisherFrame;
+    ULONG64 TargetIp;
+    PCONTEXT ContextRecord;
+    PEXCEPTION_ROUTINE LanguageHandler;
+    PVOID HandlerData;
+    PUNWIND_HISTORY_TABLE HistoryTable;
+    ULONG ScopeIndex;
+    ULONG Fill0;
+} DISPATCHER_CONTEXT, *PDISPATCHER_CONTEXT;
+{% endhighlight %}
+　　成员分别为：
+
+   * ControlPc —— 异常触发点。
+   * ImagePase —— ControlPc所在模块的基地址。
+   * FunctionEntry —— ControlPc所在函数的RUNTIME_FUNCTION。
+   * EstablisherFrame —— ControlPc所在函数的栈帧（如果建立了栈帧）或RSP。
+   * TargetIp —— 解决异常的EXCEPT_HANDLER地址，该成员只在展开的过程中被使用。RtlpExecuteHandlerForException没有使用它。
+   * ContextRecord —— 供展开过程中使用，只有当展开过程中触发新异常（返回ExceptionCollidedUnwind）时，才会被RtlDispatchException真正的使用到（参考RtlDispatchException处理ExceptionCollidedUnwind的代码）。
+   * LanguageHandler —— ControlPc所在函数的UNWIND_INFO::ExceptionRoutine。
+   * HandlerData —— ControlPc所在函数的UNWIND_INFO::ExceptionData。
+   * ScopeIndex —— UNWIND\_INFO::ExceptionData中SCOPE\_TABLE::ScopeRecord的索引，通常设置为0注：请不要与x86中运行时不断改变的EXCEPTION\_REGISTRATION::trylevel相混淆，ScopeIndex不会在在函数执行过程中改变）
+   * Fill0 —— 未用。
+
+　　再看一下它的 .fnent 输出，
+
+     1 kd> .fnent nt!RtlpExecuteHandlerForException
+     2 Debugger function entry 00000000`01458210 for:
+     3 (fffff800`008bd950) nt!RtlpExecuteHandlerForException | (fffff800`008bd970) nt!RtlpUnwindHandler
+     4 Exact matches:
+     5 nt!RtlpExecuteHandlerForException (void)
+     6
+     7 BeginAddress = 00000000`000bd950
+     8 EndAddress = 00000000`000bd963
+     9 UnwindInfoAddress = 00000000`000dfeb8
+    10
+    11 Unwind info at fffff800`008dfeb8, 10 bytes
+    12 version 1, flags 3, prolog 4, codes 1
+    13 handler routine: nt!RtlpExceptionHandler (fffff800`008bd920), data 0
+    14 00: offs 4, unwind op 2, op info 4	UWOP_ALLOC_SMALL.
+
+　　行12中显示flags等于3，即UNW\_FLAG\_EHANDLER (0x1) | UNW\_FLAG\_UHANDLER (0x2)，说明行13中显示的异常处理函数nt!RtlpExceptionHandler既负责解决异常，也负责展开。  
+　　RtlpExecuteHandlerForException会调用DISPATCHER\_CONTEXT::LanguageHandler。对于 MSC 编译得到的模块，它是nt!\_\_C\_specific\_handler，我们来看看这个函数，  
+　　原型：
+{% highlight c++ %}
+EXCEPTION_DISPOSITION
+__C_specific_handler (
+    IN PEXCEPTION_RECORD pExceptionRecord,
+    IN PVOID pEstablisherFrame,
+    IN OUT PCONTEXT pContext,
+    IN OUT PVOID pDispatcherContext
+    );
+{% endhighlight %}
+　　反汇编码：
+{% highlight nasm %}
+kd> uf __C_specific_handler
+__C_specific_handler:
+mov     qword ptr [rsp+10h],rdx ; 在栈上保存 pEstablisherFrame
+mov     rax,rsp
+sub     rsp,88h
+mov     qword ptr [rax-8],rbx
+mov     qword ptr [rax-10h],rbp
+mov     rbp,qword ptr [r9]      ; rbp = pDispatcherContext->ControlPc
+mov     qword ptr [rax-18h],rsi
+mov     qword ptr [rax-20h],rdi
+mov     qword ptr [rax-28h],r12
+mov     r12,qword ptr [r9+38h]  ; r12 = pDispatcherContext->HandlerData
+mov     qword ptr [rax-30h],r13
+mov     qword ptr [rax-38h],r14
+mov     r14,qword ptr [r9+8]    ; r14 = pDispatcherContext->ImageBase
+mov     qword ptr [rax-40h],r15
+mov     r13,r9                  ; r13 = pDispatcherContext
+sub     rbp,r14                 ; l_OffsetInFunc = pDispatcherContext->ControlPc - pDispatcherContext->ImageBase
+test    byte ptr [rcx+4],66h    ; pExceptionRecord->ExceptionFlags, EXCEPTION_UNWIND (0x66)
+mov     rsi,rdx                 ; rsi = pEstablisherFrame
+mov     r15,rcx                 ; r15 = pExceptionRecord
+jne     __C_specific_handler+0xf5
+
+; -------------------------------------------------------------------
+__C_specific_handler+0x50:
+movsxd  rdi,dword ptr [r9+48h]  ; l_ScopeIndex (rdi) = pDispatcherContext->ScopeIndex
+mov     qword ptr [rax-58h],rcx ; [rax-58h] = pExceptionRecord，供给 GetExceptionCode(Information) 使用
+mov     qword ptr [rax-50h],r8  ; [rax-50h] = pContext，供给 GetExceptionCode(Information) 使用
+cmp     edi,dword ptr [r12]     ; cmp l_ScopeIndex, pDispatcherContext->HandlerData->Count
+mov     rax,rdi                 ; rax = l_ScopeIndex
+jae     __C_specific_handler+0x166
+
+__C_specific_handler+0x69:
+add     rax,rax             ; 这里 *2，下面紧接着 *8，目的是跳过指定数目的 ScopeRecord（大小为16字节）
+lea     rbx,[r12+rax*8+0Ch] ; rbx = &(pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].HandlerAddress)
+
+__C_specific_handler+0x71:
+; 检查 ControlPc 处于哪个 __try 保护域，之步骤一
+mov     eax,dword ptr [rbx-8] ; eax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].BeginAddress
+cmp     rbp,rax               ; cmp l_OffsetInFunc, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].BeginAddress
+jb      __C_specific_handler+0xdd
+
+__C_specific_handler+0x79:
+; 检查 ControlPc 处于哪个 __try 保护域，之步骤二
+mov     eax,dword ptr [rbx-4] ; eax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress
+cmp     rbp,rax               ; cmp l_OffsetInFunc, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress
+jae     __C_specific_handler+0xdd
+
+__C_specific_handler+0x81:
+; 判断是否是 __try/__finally（JumpTarget 为 NULL）。如果是，那么跳转到下一个 ScopeRecord 继续遍历。
+cmp     dword ptr [rbx+4],0 ; cmp pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget, NULL
+je      __C_specific_handler+0xdd
+
+__C_specific_handler+0x87:
+; 到这里，已经找到与异常地址最匹配的 __try/__except
+mov     eax,dword ptr [rbx] ; eax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].HandlerAddress
+cmp     eax,1               ; cmp pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].HandlerAddress, EXCEPTION_EXECUTE_HANDLER (0x1)
+je      __C_specific_handler+0xa3 ; 如果返回 EXCEPTION_EXECUTE_HANDLER 则跳转
+
+__C_specific_handler+0x8e:
+; 是 __try/__except，且过滤域并不是 EXCEPTION_EXECUTE_HANDLER，执行 HandlerAddress
+; （注：HandlerAddress 指向的函数仍有可能会返回 EXCEPTION_EXECUTE_HANDLER）
+lea     rcx,[rsp+30h]
+add     rax,r14 ; rax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].HandlerAddress + pDispatcherContext->ImageBase
+mov     rdx,rsi ; rdx = pEstablisherFrame
+call    rax     ; 调用 EXCEPT_FILTER
+test    eax,eax
+js      __C_specific_handler+0xee ; 返回 EXCEPTION_CONTINUE_EXECUTION (-1) 则跳转
+
+__C_specific_handler+0x9f:
+test    eax,eax
+jle     __C_specific_handler+0xdd ; 返回 EXCEPTION_CONTINUE_SEARCH (0) 则跳转
+
+__C_specific_handler+0xa3:
+; 返回的是 EXCEPTION_EXECUTE_HANDLER
+mov     ecx,dword ptr [rbx+4] ; ecx = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget
+mov     r8d,1
+mov     rdx,rsi ; rdx = pEstablisherFrame
+add     rcx,r14 ; rcx = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget + pDispatcherContext->ImageBase
+call    _NLG_Notify
+mov     rax,qword ptr [r13+40h] ; rax = pDispatcherContext->HistoryTable
+mov     edx,dword ptr [rbx+4]   ; edx = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget
+movsxd  r9,dword ptr [r15]      ; r9 = pExceptionRecord->ExceptionCode
+mov     qword ptr [rsp+28h],rax ; _ARG_6 = pDispatcherContext->HistoryTable
+mov     rax,qword ptr [r13+28h] ; rax = pDispatcherContext->ContextRecord
+add     rdx,r14 ; rdx = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget + pDispatcherContext->ImageBase
+mov     r8,r15  ; r8 = pExceptionRecord
+mov     rcx,rsi ; rcx = pEstablisherFrame
+mov     qword ptr [rsp+20h],rax ; _ARG_5 = pDispatcherContext->ContextRecord
+call    RtlUnwindEx  ; 这里不会返回
+; RtlUnwindEx(pEstablisherFrame,
+;             pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget + pDispatcherContext->ImageBase
+;             pExceptionRecord,
+;             pExceptionRecord->ExceptionCode
+;             pDispatcherContext->ContextRecord,
+;             pDispatcherContext->HistoryTable)
+
+__C_specific_handler+0xdd:
+inc     edi     ; l_ScopeIndex += 1
+add     rbx,10h ; 调整到下一个 ScopeRecord::HandlerAddress
+cmp     edi,dword ptr [r12] ; cmp l_ScopeIndex, pDispatcherContext->HandlerData->Count
+jb      __C_specific_handler+0x71 
+
+__C_specific_handler+0xe9:
+; pDispatcherContext->HandlerData 遍历完毕
+jmp     __C_specific_handler+0x166
+
+__C_specific_handler+0xee:
+xor     eax,eax ; eax = ExceptionContinueExecution
+jmp     __C_specific_handler+0x16b
+
+; -------------------------------------------------------------------------------------
+__C_specific_handler+0xf5:
+; 设置了 EXCEPTION_UNWIND，当前是展开过程
+movsxd  rdi,dword ptr [r9+48h] ; l_ScopeIndex (rdi) = pDispatcherContext->ScopeIndex
+mov     rsi,qword ptr [r9+20h] ; rsi = pDispatcherContext->TargetIp
+sub     rsi,r14                ; rsi = pDispatcherContext->TargetIp - pDispatcherContext->ImageBase
+cmp     edi,dword ptr [r12]    ; cmp l_ScopeIndex, pDispatcherContext->HandlerData->Count
+mov     rax,rdi                ; rax = l_ScopeIndex
+jae     __C_specific_handler+0x166
+
+__C_specific_handler+0x109:
+add     rax,rax ;
+lea     rbx,[r12+rax*8+8] ; rbx = &(pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress)
+
+__C_specific_handler+0x111:
+; 检查 ControlPc 处于哪个 __try 保护域，之步骤一
+mov     eax,dword ptr [rbx-4] ; eax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].BeginAddress
+cmp     rbp,rax ; cmp l_OffsetInFunc, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].BeginAddress
+jb      __C_specific_handler+0x15a
+
+__C_specific_handler+0x119:
+; 检查 ControlPc 处于哪个 __try 保护域，之步骤二
+mov     ecx,dword ptr [rbx] ; ecx = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress
+cmp     rbp,rcx ; cmp l_OffsetInFunc, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress
+jae     __C_specific_handler+0x15a
+
+__C_specific_handler+0x120:
+; 到这里，已经找到与异常地址匹配的最内层（如果有多层） __try/__except
+cmp     rsi,rax ; cmp pDispatcherContext->TargetIp - pDispatcherContext->ImageBase, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].BeginAddress
+jb      __C_specific_handler+0x131
+
+__C_specific_handler+0x125:
+cmp     rsi,rcx ; cmp pDispatcherContext->TargetIp - pDispatcherContext->ImageBase, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].EndAddress
+ja      __C_specific_handler+0x131
+
+__C_specific_handler+0x12a:
+; 如果标记了 EXCEPTION_TARGET_UNWIND，说明是最后一个需要局部展开的函数。但是该次局部展开只展开到 EXCEPT_HANDLER（不包含 EXCEPT_HANDLER），所以需要判断 TargetIp
+test    byte ptr [r15+4],20h ; test pExceptionRecord->ExceptionFlags, EXCEPTION_TARGET_UNWIND (0x20)
+jne     __C_specific_handler+0x166
+
+__C_specific_handler+0x131:
+mov     eax,dword ptr [rbx+8] ; eax = pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget
+test    eax,eax ; 判断 pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget 是否为 NULL，即是否是 __try/__finally
+je      __C_specific_handler+0x13f ; 如果是 __try/__finally 则跳转
+
+__C_specific_handler+0x138:
+cmp     rsi,rax ; cmp pDispatcherContext->TargetIp, pDispatcherContext->HandlerData->ScopeRecord[l_ScopeIndex].JumpTarget
+je      __C_specific_handler+0x166
+
+__C_specific_handler+0x13d:
+jmp     __C_specific_handler+0x15a
+
+__C_specific_handler+0x13f:
+; 注意这里是先修改 pDispatcherContext->ScopeIndex，然后调用 EXCEPT_HANDLER。这样如果 EXCEPT_HANDLER 触发异常，后续展开就会跳过这个 EXCEPT_HANDLER。
+mov     rdx,qword ptr [rsp+98h]
+lea     eax,[rdi+1]             ; eax = l_ScopeIndex + 1
+mov     cl,1
+mov     dword ptr [r13+48h],eax ; pDispatcherContext->ScopeIndex = eax
+mov     r8d,dword ptr [rbx+4]   ; r8d = pDispatcherContext->HandlerData->ScopeRecord[i].HandlerAddress
+add     r8,r14                  ; r8 = pDispatcherContext->HandlerData->ScopeRecord[i].HandlerAddress + pDispatcherContext->ImageBase
+call    r8                      ; 调用 __finally 处理块，会返回（注：对于 __try/__finally，HandlerAddress 保存的是 __finally 代码块的 RVA）
+
+__C_specific_handler+0x15a:
+inc     edi                 ; l_ScopeIndex += 1
+add     rbx,10h             ; 调整到下一个 ScopeRecord::HandlerAddress
+cmp     edi,dword ptr [r12] ; cmp l_ScopeIndex, pDispatcherContext->HandlerData->Count
+jb      __C_specific_handler+0x111
+
+__C_specific_handler+0x166:
+mov     eax,1 ; eax = ExceptionContinueSearch (0n1)
+
+__C_specific_handler+0x16b:
+mov     r15,qword ptr [rsp+48h]
+mov     r14,qword ptr [rsp+50h]
+mov     r13,qword ptr [rsp+58h]
+mov     r12,qword ptr [rsp+60h]
+mov     rdi,qword ptr [rsp+68h]
+mov     rsi,qword ptr [rsp+70h]
+mov     rbp,qword ptr [rsp+78h]
+mov     rbx,qword ptr [rsp+80h]
+add     rsp,88h
+ret
+{% endhighlight %}
+　　nt!\_\_C\_specific\_handler相当于x86中的nt!\_except\_handler3。从上面的反汇编代码也可以看出它的逻辑跟nt!\_except\_handler3基本上一致。  
+　　函数代码不长。主要分为两个大分支，一个分支处理异常，一个分支处理展开（我用横线分隔开了）。
+
+　　异常解决的代码负责遍历SCOPE\_TABLE，依次调用SCOPE\_TABLE::ScopeRecord.HandlerAddress代表的EXCEPT\_FILTER，并针对返回值做出相应的处理：
+
+   * 返回EXCEPTION\_CONTINUE\_EXECUTION，说明异常已经被EXCEPT\_FILTER修复。返回ExceptionContinueExecution。
+   * 返回EXCEPTION\_CONTINUE\_SEARCH，继续遍历下一个ScopeRecord。
+   * 返回EXCEPTION\_EXECUTE\_HANDLER，说明当前ScopeRecord.JumpTarget代表的EXCEPT\_HANDLER可以处理该异常。那么调用RtlUnwindEx进行展开。
+
+　　熟悉x86的朋友可能会疑惑：在x86中nt!\_except\_handler3先进行全局展开，然后对本函数自身进行不完全的局部展开，最后执行EXCEPT\_HANDLER。而在nt!\_\_C\_specific\_handler中却找不到执行EXCEPT\_HANDLER的指令，这是怎么回事？  
+　　实际上，x64对这个流程做了一些调整，EXCEPT\_HANDLER不是由nt!\_\_C\_specific\_handler直接调用，而是作为参数传给RtlUnwindEx，RtlUnwindEx处理完展开之后才执行EXCEPT\_HANDLER。后续我们在讲展开的时候会看到具体的方法。
+
+　　\_\_C\_specific\_handler的展开分支，是对SCOPE\_TABLE进行展开，逻辑很简单，不多讲了。
+
+　　更详细的信息，请参考上面反汇编代码中我附的注释。
+
+　　另外还需要说一下SCOPE\_TABLE。  
+　　在x86中，遍历scopetable时是通过运行时动态改变的EXCEPTION\_REGISTRATION::trylevel来确定应该首先遍历哪一个scopetable\_entry。而x64中没有等同于trylevel的数据，有的朋友可能会说“SCOPE\_TABLE中不是有每个\_\_try保护域的范围RVA吗？通过范围不就可以确定在哪个\_\_try中触发了异常吗？”。  
+　　我们可以先试试这种方法，以下面这段伪码为例，
+{% highlight c++ %}
+1  VOID SehTest()
+2  {
+3      __try // 1
+4      {
+5      }
+6      __except()
+7      {
+8      }
+9  
+10     __try // 2
+11     {
+12         __try // 3
+13         {
+14             ...
+15         }
+16         __except()
+17         {
+18         }
+19     }
+20     __except()
+21     {
+22     }
+23 
+24     __try // 4
+25     {
+26     }
+27     __finally()
+28     {
+29     }
+30 }
+{% endhighlight %}
+　　上述伪码中总共有4个\_\_try，按照x86中的方法，SCOPE\_TABLE的内容应该是顺序排列的，像这样：
+
+    SCOPE_TABLE::Count等于4，  
+    SCOPE_TABLE::ScopeRecord[0]表示行3开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[1]表示行10开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[2]表示行12开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[3]表示行24开始的__try/__finally。
+
+　　假设行14处触发了异常，遍历过程应该是这样，  
+　　首先检查ScopeRecord[0]，发现其范围不包含EXCEPT_POINT，继续下一个，  
+　　开始检查ScopeRecord[1]，范围匹配了。
+
+　　那是不是该把异常交给ScopeRecord[1]处理呢？  
+　　不是！从伪码中可以很明显的看出，行14触发的异常应该首先由行12开始的\_\_try/\_\_except，即ScopeRecord[1]处理。
+
+　　可见这种方法是行不通的。  
+　　MSC通过调整SCOPE_TABLE::ScopeRecord的排列顺序来解决这个问题：
+
+    SCOPE_TABLE::Count等于4，  
+    SCOPE_TABLE::ScopeRecord[0]表示行3开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[1]表示行12开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[2]表示行10开始的__try/__except，  
+    SCOPE_TABLE::ScopeRecord[3]表示行24开始的__try/__finally。  
+
+　　即对于嵌套的\_\_try/\_\_except/\_\_finally，ScopeRecord的排列顺序是，最内层的\_\_try排在前面，其次是次内层的，依次排到最外层。  
+　　这样就能正确的遍历SCOPE\_TABLE了。
+
+　　再用伪码完整的展示一下 SCOPE_TABLE 的布置，
+
+    SCOPE_TABLE::Count = 4。
+    
+    SCOPE_TABLE::ScopeRecord[0].BeginAddress = RVA_L4; （行4的RVA） // 第一个__try  
+    SCOPE_TABLE::ScopeRecord[0].EndAddress = RVA_L5;  
+    SCOPE_TABLE::ScopeRecord[0].HandlerAddress = RVA_L6_EXCEPT_FILTER; （行6__except过滤代码首地址的RVA）  
+    SCOPE_TABLE::ScopeRecord[0].JumpTarget = RVA_L7;  
+    
+    SCOPE_TABLE::ScopeRecord[1].BeginAddress = RVA_L13; // 第三个__try  
+    SCOPE_TABLE::ScopeRecord[1].EndAddress = RVA_L15;  
+    SCOPE_TABLE::ScopeRecord[1].HandlerAddress = RVA_L16_EXCEPT_FILTER;  
+    SCOPE_TABLE::ScopeRecord[1].JumpTarget = RVA_L7;  
+    
+    SCOPE_TABLE::ScopeRecord[2].BeginAddress = RVA_L11; // 第二个__try  
+    SCOPE_TABLE::ScopeRecord[2].EndAddress = RVA_L19;  
+    SCOPE_TABLE::ScopeRecord[2].HandlerAddress = RVA_L20_EXCEPT_FILTER;  
+    SCOPE_TABLE::ScopeRecord[2].JumpTarget = RVA_L21;  
+    
+    SCOPE_TABLE::ScopeRecord[3].BeginAddress = RVA_L25; // 第四个__try  
+    SCOPE_TABLE::ScopeRecord[3].EndAddress = RVA_L26;  
+    SCOPE_TABLE::ScopeRecord[3].HandlerAddress = RVA_L28;  
+    SCOPE_TABLE::ScopeRecord[3].JumpTarget = 0;
+
+　　我们再模拟一下nt!\_\_C\_specific\_handler是如何遍历SCOPE\_TABLE的：
+
+   1. 首先通过传入参数中的pDispatcherContext->ControlPc和pDispatcherContext->ImageBase计算出异常触发点的RVA（简称E\_RVA）。
+   2. 通过pDispatcherContext->ScopeIndex确认是否需要遍历。如果需要遍历，则从它指定的ScopeRecord开始遍历。pDispatcherContext->ScopeIndex一般都为0，只有返回ExceptionCollidedUnwind时，RtlDispatchException才可能将它设置为其他值。
+   3. 通过比较E\_RVA和ScopeRecord[?].BeginAddress、ScopeRecord[?].EndAddress 来找到正确的处理函数，
+      首先ScopeRecord[0] 范围不匹配，遍历下一个。  
+      然后ScopeRecord[1]，发现范围匹配，并且是\_\_try/\_\_except组合。于是调用ScopeRecord[1].HandlerAddress，假设它返回的是EXCEPTION\_CONTINUE\_SEARCH，那么继续遍历下一个。，  
+      这次是ScopeRecord[2]，发现范围匹配，并且是\_\_try/\_\_except组合。于是调用ScopeRecord[2].HandlerAddress，假设它返回的是EXCEPTION\_EXECUTE\_HANDLER，那么说明找到了解决方案。  
+   4. 调用RtlUnwindEx，把ScopeRecord[2].JumpTarget对应的绝对地址作为TargetIp参数传给它。RtlUnwindEx全局展开完毕后执行TargetIp。
+
+　　到这里，异常分发就大致讲述完毕。接下来是关于展开和解决的内容。
+
+
+# 三、展开、解决 #
+
+　　x64 中展开使用的函数有 RtlVirtualUnwind、RtlUnwindEx 和 RtlpExecuteHandlerForUnwind。其中 RtlVirtualUnwind 已经讲了，我们来看看余下的两个。
+
+　　首先是 RtlUnwindEx，原型如下：
+{% highlight c++ %}
+VOID
+RtlUnwindEx (
+    IN PVOID TargetFrame OPTIONAL,
+    IN PVOID TargetIp OPTIONAL,
+    IN PEXCEPTION_RECORD ExceptionRecord OPTIONAL,
+    IN PVOID ReturnValue,
+    IN PCONTEXT OriginalContext,
+    IN PUNWIND_HISTORY_TABLE HistoryTable OPTIONAL
+    );
+{% endhighlight %}
+
+　　参数分别是：  
+　　TargetFrame —— 目标帧，即最后一个需要展开的帧。  
+　　TargetIp —— 前面有讲过，它就是ScopeRecord[?].JumpTarget代表的地址，即EXCEPT\_HANDLER。  
+　　ExceptionRecord —— 异常信息。  
+　　ReturnValue —— 传递给TargetIp的返回值，分析过程中没发现它有什么用处。  
+　　OriginalContext —— 虽然被声明为IN，但是实际上RtlUnwindEx并没有使用它内部的数据。  
+　　HistoryTable —— 用于加速查找RUNTIME_FUNCTION。
+
+　　主要功能是：从自身开始展开，到TargetFrame停止。然后跳转到TargetIp继续执行。  
+　　流程：
+
+   1. 申请一个类型为CONTEXT的局部变量l\_Context，调用RtlCaptureContext将当前自身的环境复制到l\_Context。
+   2. 通过RtlVirtualUnwind对l\_Context进行模拟展开，推动遍历。对每个遍历到的UNWIND\_INFO，检查UNWIND\_INFO::Flags是否包含UNW\_FLAG\_UHANDLER。如果包含，则调用UNWIND\_INFO::ExceptionHandler进行局部展开。否则继续遍历下一个。
+      循环本步骤，直到展开到TargetFrame，即到达解决异常的EXCEPT\_HANDLER所在的函数（简称为ExceptionHandlerFunc）了。
+   3. 这时l\_Context内已经是从RtlUnwindEx完整展开到EXCEPT\_HANDLER的环境了。即此时l\_Context已经是ExceptionHandlerFunc的执行环境了。
+
+　　调用RtlRestoreContext，用l\_Context替换当前线程的执行环境，于是就跳转到EXCEPT\_HANDLER继续执行。  
+　　这样就完美的从触发异常的环境跳到了新的环境中。
+
+　　这个过程有点类似这种手法：
+
+   1. 将某台机器的系统ghost到一个bak.gho文件。
+   2. 把bak.gho恢复到一台临时机器，然后对这台临时机器做一些调整。调整完毕后制作一个临时机器的bak\_mod.gho。
+   3. 将bak\_mod.gho恢复到原来那台机器。
+
+　　这个流程很重要，我手绘了一副图帮助理解，
+{% highlight c++ %}
+__try
+{
+    ExRaiseStatus(STATUS_INVALID_PARAMETER);
+}
+__except(EXCEPTION_EXECUTE_HANDLER)
+{
+}
+{% endhighlight %}
+
+　　图：（箭头方向是调用方向）
+
+   1. 异常解决流程，从EXCEPT\_POINT到RtlUnwindEx，途中已经找到能够解决该异常的EXCEPT\_HANDLER了（以参数TargetIp表示），当前线程状态为ThreadContext
+   
+        +----------------------------------+
+        | ......                           |
+        | RtlRaiseStatus                 | |
+        | RtlDispatchException           | |-> ThreadContext &
+        | RtlpExecuteHandlerForException | |   TargetIp = ExceptionHandler
+        | __C_specific_handler           | |
+        | RtlUnwindEx                    v |
+        |                                  |
+        +----------------------------------+
+   
+   2. RtlUnwindEx将当前自身状态复制到ThreadContext_Copy中
+   
+        +----------------------------------+                                  +----------------------------------+
+        | ......                           |                                  | ......                           |
+        | RtlRaiseStatus                 | |                                  | RtlRaiseStatus                 | |
+        | RtlDispatchException           | |-> ThreadContext &                | RtlDispatchException           | |-> ThreadContext_Copy &
+        | RtlpExecuteHandlerForException | |   TargetIp = ExceptionHandler    | RtlpExecuteHandlerForException | |   TargetIp = ExceptionHandler
+        | __C_specific_handler           | |                                  | __C_specific_handler           | |
+        | RtlUnwindEx                    v |                                  | RtlUnwindEx                    v |
+        |                                  |                                  |                                  |
+        +----------------------------------+                                  +----------------------------------+
+   
+   3. 用ThreadContext_Copy进行展开，一直展开到异常触发点停止。（右边图中箭头方向是展开方向）
+   
+        +----------------------------------+                                  +----------------------------------+
+        | .....                            |                                  | ......                           |
+        | RtlRaiseStatus                 | |                                  | RtlRaiseStatus                 ^ |
+        | RtlDispatchException           | |-> ThreadContext                  | RtlDispatchException           | |-> ThreadContext_Copy &
+        | RtlpExecuteHandlerForException | |   TargetIp = ExceptionHandler    | RtlpExecuteHandlerForException | |   TargetIp = ExceptionHandler
+        | __C_specific_handler           | |                                  | __C_specific_handler           | |
+        | RtlUnwindEx                    v |                                  | RtlUnwindEx                    | |
+        |                                  |                                  |                                  |
+        +----------------------------------+                                  +----------------------------------+
+   
+   4. 将ThreadContext\_Copy.Rip设置为TargetIp，以ThreadContext\_Copy为参数调用RtlpRestoreContext。跳转到TargetIp继续执行。
+   
+        +----------------------------------+
+        | ......                           |
+        | EXCEPT_HANDLER                   |-> ThreadContext (ThreadContext.Rip = TargetIp)
+        |                                  |
+        +----------------------------------+
+        
+　　这样就完成了展开和执行EXCEPT_HANDLER的工作。
+
+　　RtlpExecuteHandlerForUnwind没有什么改变，原型依旧：
+{% highlight c++ %}
+EXCEPTION_DISPOSITION
+RtlpExecuteHandlerForUnwind (
+    IN PEXCEPTION_RECORD ExceptionRecord,
+    IN PVOID EstablisherFrame,
+    IN OUT PCONTEXT ContextRecord,
+    IN OUT PVOID DispatcherContext
+    );
+{% endhighlight %}
+　　它会注册一个异常处理函数RtlpUnwindHandle，当触发新异常时RtlpUnwindHandler会返回ExceptionCollidedUnwind。关于ExceptionCollidedUnwind，我们后面还会详细讲述。  
+　　RtlpExecuteHandlerForUnwind的实现源码位于$WRK-v1.2\base\ntos\rtl\amd64\xcptmisc.asm:199。  
+　　RtlpUnwindHandle的实现源码位于$WRK-v1.2\base\ntos\rtl\amd64\xcptmisc.asm:136。
+
+　　到这里，我们讲完了展开的逻辑。接下来我们要讲述两个比较特殊的返回值：ExceptionNestedException和ExceptionCollidedUnwind。
+
+
+# 四、ExceptionNestedException和ExceptionCollidedUnwind #
+
+　　之所以专门讲述这两个返回值，是因为在分析过程中，我感觉常规情况的SEH流程理解起来并不困难，难理解的是这两种不一般的情况。它们不一般之处在于：在处理异常的过程中又触发了新的异常。  
+　　先来讲一下这两个返回值的含义：  
+　　ExceptionNestedException —— 在异常分发过程中触发新的异常，比如执行EXCEPT\_FILTER时触发异常。  
+　　ExceptionCollidedUnwind —— 在展开过程中触发新的异常，比如执行FINALLY\_HANDLER时触发异常。  
+
+　　首先来讲讲ExceptionNestedException，以如下伪码为例：
+{% highlight c++ %}
+1  VOID SehTest()
+2  {
+3      __try
+4      {
+5          ExRaiseStatus();
+6      }
+7      __except(ExRaiseStatus(), EXCEPTION_CONTINUE_SEARCH) // EXCEPT_FILTER_1
+8      { // EXCEPT_HANDLER_1
+9      }
+10 }
+11
+12 VOID Caller()
+13 {
+14     __try
+15     {
+16         SehTest();
+17     }
+18     __except(EXCEPTION_EXECUTE_HANDLER) // EXCEPT_FILTER_2
+19     { // EXCEPT_HANDLER_2
+20     }
+21 }
+{% endhighlight %}
+　　上述代码会两次触发异常，第一次是行5的ExRaiseStatus，第二次是行7的ExRaiseStatus。为了方便区分，我将它们分别标记为EXCEPT\_POINT#1、EXCEPT\_POINT#2。  
+　　我们来看一下这两个异常的处理流程：
+
+   1. ExRaiseStatus#1会创建保存EXCEPT\_POINT#1触发时的状态Context#1，并构建一个EXCEPTION\_RECORD，然后将他们作为参数来调用RtlDispatchException#1。（注：这种方式的的触发点是ExRaiseStatus内部，而非SehTest的第5行。即Context#1记录的异常触发点是ExRaiseStatus#1内部）
+   2. RtlDispatchException#1根据Context#1首先找到EXCEPT\_POINT#1所在函数ExRaiseStatus#1的UNWIND\_INFO，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是继续遍历。
+   3. RtlDispatchException#1遍历到SehTest，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_EHANDLER，于是调用其UNWIND\_INFO::ExceptionHandler，即\_\_C\_specific\_handler$2。\_\_C\_specific\_handler$2遍历SehTest的SCOPE\_TABLE，发现唯一的一个ScopeRecord。于是执行ScopeRecord[0].HandlerAddress，即行7的SehTest::EXCEPT\_FILTER\_1#1。此时的调用栈如下（竖线后的内容为函数的UNWIND\_INFO::Flags和UNWIND\_INFO::ExceptionHandler，其中Flags缩写为E、U、N）：
+   
+        (1)  Caller                                 | E  & __C_specific_handler$1
+        (2)  SehTest                                | E  & __C_specific_handler$2
+        (3)  ExRaiseStatus#1                        | N
+        (4)  RtlDispatchException#1                 | N
+        (5)  RtlpExecuteHandlerForException#1       | EU & RtlpExceptionHandler$5
+        (6)  __C_specific_handler$2                 | N
+        (7)  EXCEPT_FILTER_1#1                      | N
+   
+   4. EXCEPT\_FILTER#1触发EXCEPT\_POINT#2。同步骤1类似，ExRaiseStatus会调用RtlDispatchException#2，这个过程中同样会创建保存EXCEPT\_POINT#2的状态，我们称之为Context#2。
+   5. RtlDispatchException#2根据Context#2找到了EXCEPT\_POINT#2所在函数ExRaiseStatus#2，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是继续遍历。
+   6. RtlDispatchException#2遍历到EXCEPT\_FILTER\_1#1，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是继续遍历。（注：EXCEPT\_FILTER虽然代码形式上从属于SehTest函数，但实际上它是一个单独的函数，有自己的UNWIND\_INFO，跟SEH的UNWIND\_INFO并不是同一个）
+   7. RtlDispatchException#2遍历到\_\_C\_specific\_handler$2、RltpExecuteHandlerForException#1、RtlDispatchException#1、E​xRaiseStatus#1，这些函数要么被标记为UNW\_FLAG\_NHANDLER，要么UNWIND\_INFO::ExceptionHandler返回ExcetpionNestedException，结果都是继续遍历，所以不再一一讲述。继续遍历下一个。
+   8. RtlDispatchException#2遍历到SehTest，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_EHANDLER，于是调用其UNWIND\_INFO::ExceptionRoutine，即\_\_C\_specific\_handler$2，发现范围匹配，于是调用EXCEPT\_FILTER\_1#1，于是又触发异常，这次是#3异常。此时的调用栈如下：
+   
+        (1)  Caller                                 | E  & __C_specific_handler$1
+        (2)  SehTest                                | E  & __C_specific_handler$2
+        (3)  ExRaiseStatus#1                        | N
+        (4)  RtlDispatchException#1                 | N
+        (5)  RtlpExecuteHandlerForException#1       | EU & RtlpExceptionHandler$5
+        (6)  __C_specific_handler$2                 | N
+        (7)  EXCEPT_FILTER_1#1                      | N
+        (8)  ExRaiseStatus#2                        | N
+        (9)  RtlDispatchException#2                 | N
+        (10) RtlpExecuteHandlerForException#2       | EU & RtlpExceptionHandler$10
+        (11) __C_specific_handler$2                 | N
+        (12) EXCEPT_FILTER_1#2                      | N
+        (13) ExRaiseStatus#3                        | N
+   
+   9. \#3异常的处理流程同#2的处理流程类似，也会再遍历到\_\_C\_specific\_handler$2，也会再调用EXCEPT\_FILTER\_1，于是会触发#4异常、#5异常等等。最终内核栈溢出，BSOD。
+
+　　以上就是ExceptionNestedException的产生以及处理的流程。过程中还有一些细节操作，为了描述简洁，我没有在上述过程中一一讲述。
+
+　　再来看看ExceptionCollidedUnwind。它比ExceptionNestedException更复杂一些，我们以如下伪码为例，
+{% highlight c++ %}
+1  VOID SehTest()
+2  {
+3      __try
+4      {
+5          ExRaiseStatus();
+6      }
+7      __finally
+8      { // FINALLY_HANDLER_1
+9          ExRaiseStatus();
+10     }
+11 }
+12
+13 VOID Caller()
+14 {
+15     __try
+16     {
+17         SehTest();
+18     }
+19     __except(EXCEPTION_EXECUTE_HANDLER) // EXCEPT_FILTER_2
+20     { // EXCEPT_HANDLER_2
+21     }
+22 }
+{% endhighlight %}
+　　伪码中也有两处触发异常的地方，第一次在行5，第二次在行9。也分别标记为EXCEPT\_POINT#1和EXCEPT\_POINT#2。处理流程：
+
+   1. ExRaiseStatus#1创建保存EXCEPT\_POINT#1的状态Context#1，并构建一个EXCEPTION\_RECORD，然后将他们作为参数来调用RtlDispatchException#1。
+   
+   2. RtlDispatchException#1根据Context#1开始遍历：
+   
+      1. 首先遍历到EXCEPT\_POINT#1 所在函数ExRaiseStatus，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是遍历下一个。  
+      2. 然后遍历到SehTest，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_UHANDLER，于是继续遍历下一个。  
+      3. 然后遍历到Caller，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_EHANDLER，于是调用其UNWIND\_INFO::ExceptionRoutine即\_\_C\_specific\_handler。\_\_C\_specific\_handler发现可以处理该异常，于是以EXCEPT\_HANDLER\_2为TargetIp参数调用RtlUnwindEx。
+   
+   3. RtlUnwindEx从自身开始展开，展开到SehTest，执行FINALLY\_HANDLER\_1时触发新异常。此时调用栈为：
+   
+        (1)  Caller                              | E  & __C_specific_handler$1
+        (2)  SehTest                             | U  & __C_specific_handler$2
+        (3)  ExRaiseStatus#1                     | N
+        (4)  RtlDispatchException#1              | N
+        (5)  RtlpExecuteHandlerForException#1    | EU & RtlpExceptionHandler$5
+        (6)  __C_specific_handler$1              | N
+        (7)  RtlUnwindEx#1                       | N
+        (8)  RtlpExecuteHandlerForUnwind#1       | EU & RtlpUnwindHandler$8
+        (9)  __C_specific_handler$2              | N
+        (10) FINALLY_HANDLER_1                   | N
+        (11) ExRaiseStatus#2                     | N
+   
+      需要说明的是，调用栈(7)RtlUnwindEx创建并初始化了一个DISPATCHER\_CONTEXT变量（后续称之为pDispatcherContextForUnwind），并作为参数传递给调用栈(8)RltpExecuteHandlerForUnwind，后者在调用(9)\_\_C\_specific\_handler$2之前将pDispatcherContextForUnwind保存在自己的栈中。此时pDispatcherContextForUnwind的内容表示的是调用栈(2)SehTest的情况。后续步骤会用到这个pDispatcherContextForUnwind。
+   4. (11)ExRaiseStatus#2将EXCEPT\_POINT#2触发时的状态保存到Context#2，然后调用RtlDispatchException#2进行EXCEPT\_POINT#2的分发。
+   5. RtlDispatchException#2根据Context#2开始遍历，
+   
+       1. 首先遍历到EXCEPT\_POINT#2所在函数ExRaiseStatus#2，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是遍历下一个。
+       2. 然后遍历到FINALLY\_HANDLER\_1（同前面提到的EXCEPT\_FILTER一样，FINALLY\_HANDLER实际上也是一个单独的函数，有自己的RUNTIME\_FUNCTION和UNWIND\_INFO），发现其UNWIND\_INFO::Flags为	UNW\_FLAG\_NHANDLER，于是遍历下一个。
+       3. 然后遍历到(9)\_\_C\_specific\_handler$2，发现其UNWIND\_INFO::Flags为UNW\_FLAG\_NHANDLER，于是继续遍历。
+       4. 然后遍历到(8)RtlpExecuteHandlerForUnwind#1，发现其UNWIND\_INFO::Flags包含UNW\_FLAG\_EHANDLER。于是调用其UNWIND\_INFO::ExceptionRoutine即RtlpUnwindHandler$8。RtlpUnwindHandler$8会取出步骤3中所提到的pDispatcherContextForUnwind，将其内容拷贝到自己的传出参数（参考RtlpUnwindHandler的函数原型）pDispatcherContext中，然后返回ExceptionCollidedUnwind。
+      
+   6. RtlDispatchException#2收到ExceptionCollidedUnwind后，从传回来的pDispatchContext中取出诸如ControlPc、EstablisherFrame等值（如步骤3所说，此时这些值反应的是(2)SehTest的状态），用这些值来继续遍历。
+   
+      1. 首先遍历到(2)SehTest，调用RtlpExecuteHandlerForException#2，进而调用\_\_C\_specific\_handler$2，但是发现pDispatcherContext->ScopeIndex（步骤(9)中在调用(10)FINALLY\_HANDLER\_1之前+1了，参考\_\_C\_specific\_handler反汇编码）等于pDispatcherContext->HandlerData->Count。于是继续遍历。
+      2. 然后遍历到(1)Caller，调用RtlpExecuteHandlerForException#2，进而调用\_\_C\_specific\_handler$1，发现它可以处理#2异常，于是以EXCEPT\_HANDLER#2为TargetIp参数调用RtlUnwindEx。此时调用栈如下：
+   
+            (1)  Caller                              | E  & __C_specific_handler$1
+            (2)  SehTest                             | U  & __C_specific_handler$2，但没有 EXCEPT_HANDLER
+            (3)  ExRaiseStatus#1                     | N
+            (4)  RtlDispatchException#1              | N
+            (5)  RtlpExecuteHandlerForException#1    | EU & RtlpExceptionHandler$6
+            (6)  __C_specific_handler$1              | N
+            (7)  RtlUnwindEx#1                       | N
+            (8)  RtlpExecuteHandlerForUnwind#1       | EU & RtlpUnwindHandler$8
+            (9)  __C_specific_handler$2              | N
+            (10) FINALLY_HANDLER#1                   | N
+            (11) ExRaiseStatus#2                     | N
+            (12) RtlDispatchException#2              | N
+            (13) RtlpExecuteHandlerForException#2    | EU & RtlpExceptionHandler
+            (14) __C_specific_handler$1              | N
+            (15) RtlUnwindEx                         | N
+   
+   7. (17)RtlUnwindEx展开完毕后，通过RtlRestoreContext跳转到EXCEPT\_HANDLER#2继续执行。  
+      在上述过程中，我们可以发现，遍历过程中RtlDispatchException等系统函数被频繁遍历到。于是就有了前面提到的全局展开历史表RtlpUnwindHistoryTable，这个表中存放着RtlDispatchException、RtlUnwindEx等函数的RUNTIME_FUNCTION和ImageBase信息，这样就不用每次都去解析PE+中的ExceptionDirectory，实现了加速。
+
+　　到这里，我们就讲完了x64 SEH的实现。可以发现，x64和x86的SEH思想或者说框架是一样的：
+
+   1. RtlDispatchException和RtlUnwindEx都对异常注册信息进行遍历。前者是为了分发异常而遍历，后者是为了展开而遍历。
+   2. MSC提供的异常处理函数按照“异常解决”和“展开”两个分支，对SCOPE\_TABLE/scopetable进行遍历。前者是为了找到EXCEPT\_FILTER&EXCEPT\_HANDLER，后者是为了找到FINALLY\_HANDLER。
+   3. RtlDispatchException和RtlUnwindEx借助MSC提供的异常处理函数这个桥梁，配合处理异常。
+
+　　主要的改变有两点：
+
+   1. RtlDispatchException和RtlUnwindEx通过调用RtlVirtualUnwind推动遍历。
+   2. 所有的非叶函数都参与到SEH，尽管大部分的函数都没有使用到SEH。
+
+　　以上我们主要讲述的是x64 SEH的内部实现。对于使用者，也有一个好消息，我们来看看，
+{% highlight c++ %}
+VOID SehTest()
+{
+    __try
+    {
+        __try
+        {
+            ExRaiseStatus(STATUS_INVALID_PARAMETER);
+            DbgPrint("%u [%s] __try \n", __LINE__, __FILE__);
+        }
+        __except((STATUS_INVALID_PARAMETER == GetExceptionCode()) ?
+                 EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER)
+        {
+            DbgPrint("%u [%s] __except \n", __LINE__, __FILE__);
+        }
+    }
+    __finally
+
+        DbgPrint("%u [%s] __finally \n", __LINE__, __FILE__);
+    }
+}
+{% endhighlight %}
+　　对应的反汇编码：
+{% highlight nasm %}
+kd> uf passthrough!SehTest
+PassThrough!SehTest:
+sub     rsp,38h
+mov     ecx,0C000000Dh
+call    qword ptr [PassThrough!_imp_ExRaiseStatus]
+lea     r8,[PassThrough! ?? ::FNODOBFM::`string']
+mov     edx,39h
+lea     rcx,[PassThrough! ?? ::FNODOBFM::`string']
+call    PassThrough!DbgPrint
+jmp     PassThrough!SehTest+0x42
+
+PassThrough!SehTest+0x42:
+lea     r8,[PassThrough! ?? ::FNODOBFM::`string']
+mov     edx,42h
+lea     rcx,[PassThrough! ?? ::FNODOBFM::`string']
+call    PassThrough!DbgPrint
+add     rsp,38h
+ret
+{% endhighlight %}
+　　我们发现SehTest内部完全没有任何SEH的踪迹，不像x86那样会有创建、销毁EXCEPTION\_REGISTRATION\_RECORD和调整EXCEPTION\_REGISTRATION\_RECORD::trylevel等操作。  
+　　这样的好处就是使用者无需再担心性能损耗，可以放心大胆的使用SEH机制了。
+
+
+# 附录一 #
+
+　　为了方便自己分析，我写了一个简单的windbg扩展，提供了几个x64 seh常用功能：
+
+    !boxr.unwindinfo    module-name    unwindinfo_addr
+    功能：
+        用于查询指定 UNWIND_INFO 结构的详细信息。
+    参数说明：
+        module-name —— 待查询的 UNWIND_INFO 结构对应函数的模块名
+        unwindinfo_addr —— UNWIND_INFO 结构的绝对地址
+    ------------------------------------------------------------
+    !boxr.rtfn    option    module    runtimefunction_addr
+    功能：
+        用于查询指定 RUNTIME_FUNCTION 结构的详细信息。（rtfn 表示 RunTime_FunctioN）
+    参数说明：
+        option —— 参数选项，目前支持两种：
+            /a 表示 module 参数为模块基地址
+            /n 表示 module 参数为模块名称
+        module —— RUNTIME_FUNCTION 结构对应函数所在的模块，具体形式根据 option 而定。
+        runtimefunction_addr —— 需要查询的 RUNTIME_FUNCTION 结构体的绝对地址。支持 @rax 操作方式，但不支持复杂的组合，比如 @rax+8。
+　　使用的方法是：用.extpath+命令将boxr.dll所在的目录添加到windbg的搜索路径中，然后就可以使用了。需要卸载时就.unload。
+
+　　简单说明一下这两个命令。
+
+　　比如我们要查看下面这个函数的UNWIND\_INFO信息：
+{% highlight c++ %}
+VOID SehTest()
+{
+    __try
+    {
+        DbgPrint("%u [%s] __try \n", __LINE__, __FILE__);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("%u [%s] __except \n", __LINE__, __FILE__);
+    }
+
+    __try
+    {
+        __try
+        {
+            __try
+            {
+                CollidedUnwind();
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                DbgPrint("%u [%s] __except \n", __LINE__, __FILE__);
+            }
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+            DbgPrint("%u [%s] __except \n", __LINE__, __FILE__);
+        }
+    }
+    __finally
+    {
+        DbgPrint("%u [%s] __finally \n", __LINE__, __FILE__);
+    }
+
+    __try
+    {
+        DbgPrint("%u [%s] __try \n", __LINE__, __FILE__);
+
+        __try
+        {
+            DbgPrint("%u [%s] __try \n", __LINE__, __FILE__);
+        }
+        __finally
+        {
+            DbgPrint("%u [%s] __finally \n", __LINE__, __FILE__);
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("%u [%s] __except \n", __LINE__, __FILE__);
+    }
+
+    return;
+}
+{% endhighlight %}
+
+　　操作步骤：
+
+   1. 使用.fnent命令获得SehTest的基本信息，
+
+        kd> .fnent passthrough!SehTest
+        Debugger function entry 00000000`00758210 for:
+        (fffffadf`f135d080)   PassThrough!SehTest   |  (fffffadf`f135d180)   PassThrough!LeafTest
+        Exact matches:
+            PassThrough!SehTest (void)
+
+        BeginAddress      = 00000000`00001080
+        EndAddress        = 00000000`00001175
+        UnwindInfoAddress = 00000000`000026b8
+
+        Unwind info at fffffadf`f135e6b8, 10 bytes
+          version 1, flags 3, prolog 4, codes 1
+          handler routine: PassThrough!_C_specific_handler (fffffadf`f135d5de), data 6
+          00: offs 4, unwind op 2, op info 4    UWOP_ALLOC_SMALL.
+          
+   2. 使用!boxr.unwindinfo查询详细信息，
+
+        kd> !boxr.unwindinfo passthrough fffffadf`f135e6b8
+        _UNWIND_INFO for fffffadff135e6b8
+        Flags:
+            EU
+        ExceptionRoutine:
+            PassThrough!_C_specific_handler (fffffadf`f135d5de)
+        ScopeTable:
+            Count: 6
+            ScopeRecord[0]      (fffffadff135e6c8)
+                BeginAddress:
+                    PassThrough!SehTest+0x4 (fffffadf`f135d084)
+                EndAddress:
+                    PassThrough!SehTest+0x1e (fffffadf`f135d09e)
+                HandlerAddress:
+                    PassThrough!SehTest$filt$0 (fffffadf`f135d8a0)
+                JumpTarget:
+                    PassThrough!SehTest+0x1e (fffffadf`f135d09e)
+            [省略中间3个 ScopeRecord 成员]
+            ScopeRecord[5]      (fffffadff135e718)
+                BeginAddress:
+                    PassThrough!SehTest+0x8b (fffffadf`f135d10b)
+                EndAddress:
+                    PassThrough!SehTest+0xd7 (fffffadf`f135d157)
+                HandlerAddress:
+                    PassThrough!SehTest$filt$5 (fffffadf`f135d960)
+                JumpTarget:
+                    PassThrough!SehTest+0xd7 (fffffadf`f135d157)
+
+      !boxr.rtfn的用法也类似，比如：
+
+        kd> !box.rtfn /n passThrough @rax
+        _RUNTIME_FUNCTION for fffffadff1113000
+        BeginAddress:
+            PassThrough!CollidedUnwind (fffffadf`f1110020)
+        EndAddress:
+            PassThrough!CollidedUnwind+0x38 (fffffadf`f1110058)
+        UnwindData:
+            fffffadff1111688
+        _UNWIND_INFO for fffffadff1111688
+        Flags:
+            U
+        ExceptionRoutine:
+            PassThrough!_C_specific_handler (fffffadf`f11104ee)
+        ScopeTable:
+            Count: 1
+            ScopeRecord[0]      (fffffadff1111698)
+                BeginAddress:
+                    PassThrough!CollidedUnwind+0x4 (fffffadf`f1110024)
+                EndAddress:
+                    PassThrough!CollidedUnwind+0x10 (fffffadf`f1110030)
+                HandlerAddress:
+                    PassThrough!CollidedUnwind$fin$0 (fffffadf`f1110750)
+                JumpTarget:
+                    0
+
+   需要说明的是，我写这个扩展的目的仅仅是为了分析x64 SEH过程中能轻松的查看相关数据结构的详细信息，所以并没有在这个扩展上花很多时间。其代码是从MS例子代码的基础上增加了我需要的功能。应该有一些BUG，但是对我来说不重要，已经满足我的需要了。源码也放在附件里，方便分析的朋友根据自己的需要进行修改。  
+   另外有一个疑问：我编译的x64 wrk1.2内核无法对.c代码进行源码调试，对.asm代码倒是可以，这是为什么？我看了一下编译选项，没看出什么猫腻。有经验的朋友分享一下吧，感谢 :-)
+
+
+# 附录二 RtlUnwindEx 的反汇编代码和注释 #
+
+　　由于无法源码调试，只好把它反汇编出来加上注释……
+{% highlight c++ %}
+             VOID
+             RtlUnwindEx (
+/* rcx    */     IN PVOID pEstablisherFrame OPTIONAL,
+/* rdx    */     IN PVOID pJumpTargetIp OPTIONAL,
+/* r8     */     IN PEXCEPTION_RECORD pExceptionRecord OPTIONAL,
+/* r9     */     IN PVOID ReturnValue,
+/* rsp+28 */     IN PCONTEXT pOriginalContext,
+/* rsp+30 */     IN PUNWIND_HISTORY_TABLE pHistoryTable OPTIONAL
+                 );
+{% endhighlight %}
+
+{% highlight nasm %}
+kd> uf nt!RtlUnwindEx
+nt!RtlUnwindEx:
+mov     qword ptr [rsp+20h],r9
+mov     qword ptr [rsp+18h],r8
+mov     qword ptr [rsp+10h],rdx
+mov     rax,rsp
+sub     rsp,678h
+mov     qword ptr [rax-8],rbx
+mov     qword ptr [rax-10h],rbp
+mov     qword ptr [rax-18h],rsi
+mov     rsi,qword ptr [rsp+6A0h] ; rsi = pOriginalContext
+mov     qword ptr [rax-20h],rdi
+mov     qword ptr [rax-28h],r12
+mov     qword ptr [rax-40h],r15
+mov     rbp,rcx
+mov     r15,rdx
+lea     rdx,[rsp+40h] ; rsp+40 为 l_HighLimit
+lea     rcx,[rsp+50h] ; rsp+50 为 l_LowLimit
+mov     rbx,r8
+mov     rdi,rsi
+lea     r12,[rax-518h] ; r12 = &l_Context
+call    nt!RtlpGetStackLimits
+mov     rcx,rsi
+call    nt!RtlCaptureContext
+mov     rax,qword ptr [rsp+6A8h] ; rax = pHistoryTable
+test    rax,rax
+je      nt!RtlUnwindEx+0x74
+
+nt!RtlUnwindEx+0x70:
+mov     byte ptr [rax+4],1 ; pHistoryTable->Search = UNWIND_HISTORY_TABLE_GLOBAL
+
+nt!RtlUnwindEx+0x74:
+xor     ecx,ecx
+test    rbx,rbx ; 判断 pExceptionRecord 是否为 NULL
+jne     nt!RtlUnwindEx+0xbc
+
+nt!RtlUnwindEx+0x7b:
+; pExceptionRecord 等于 NULL
+mov     rax,qword ptr [rsi+0F8h]  ; rax = pOriginalContext->Rip
+lea     rbx,[rsp+0C0h]            ; rbx = &l_ExceptionRecord
+mov     dword ptr [rsp+0C0h],0C0000027h ; l_ExceptionRecord.ExceptionCode = STATUS_UNWIND (0xC0000027)
+mov     qword ptr [rsp+0D0h],rax  ; l_ExceptionRecord.ExceptionAddress = pOriginalContext->Rip
+mov     rax,qword ptr [rsp+6A8h]  ; rax = pHistoryTable
+mov     qword ptr [rsp+690h],rbx  ; [r8-home] = &l_ExceptionRecord ????
+mov     qword ptr [rsp+0C8h],rcx  ; l_ExceptionRecord.ExceptionRecord = NULL
+mov     dword ptr [rsp+0D8h],ecx  ; l_ExceptionRecord.NumberParameters = 0
+
+nt!RtlUnwindEx+0xbc:
+mov     rbx,qword ptr [rsp+680h]  ; rbx = &[rcx-home]
+mov     esi,2 ; l_ExceptionFlags(esi) = EXCEPTION_UNWINDING (2)
+mov     ecx,6 ; ecx = EXCEPTION_EXIT_UNWIND (6)
+test    rbp,rbp ; 判断 pEstablisherFrame 是否为 NULL
+mov     qword ptr [rsp+648h],r13 ; 保存 r13
+mov     qword ptr [rsp+640h],r14 ; 保存 r14
+cmove   esi,ecx ; if (NULL == pEstablisherFrame) { l_ExceptionFlags = EXCEPTION_EXIT_UNWIND (6) }
+xchg    ax,ax
+xchg    ax,ax
+xchg    ax,ax
+
+nt!RtlUnwindEx+0xf0:
+mov     r13,qword ptr [rdi+0F8h] ; r13 = pOriginalContext->Rip
+lea     rdx,[rsp+60h] ; rdx = &l_pImageBase
+mov     r8,rax        ; r8 = pHistoryTable
+mov     rcx,r13
+mov     qword ptr [rsp+68h],r13
+call    nt!RtlLookupFunctionEntry
+; l_pFunctionEntry = RtlLookupFunctionEntry(pOriginalContext->Rip,
+;                                           &l_pImageBase,
+;                                           pHistoryTable)
+test    rax,rax ; 判断 l_pFunctionEntry (eax) 是否为 NULL
+mov     r14,rax ; r14 = l_pFunctionEntry
+je      nt!RtlUnwindEx+0x3ab
+
+nt!RtlUnwindEx+0x118:
+mov     rdx,rdi ; rdx = pOriginalContext
+mov     rcx,r12 ; rcx = &l_Context
+call    nt!RtlpCopyContext
+; RtlpCopyContext(&l_Context, pOriginalContext)
+mov     rdx,qword ptr [rsp+60h] ; rdx = l_pImageBase
+mov     qword ptr [rsp+38h],0   ; _ARG_8 = 0
+lea     rax,[rsp+680h]          ; rax = &[rcx-home]，这里被用作局部变量 l_pEstablisherFrame 空间
+mov     r9,r14                  ; r9 = l_pFunctionEntry
+mov     r8,r13                  ; r8 = pOriginalContext->Rip
+mov     qword ptr [rsp+30h],rax ; _ARG7 = &l_pEstablisherFrame
+lea     rax,[rsp+58h]           ; rax = &l_pHandlerData
+mov     ecx,2                   ; ecx = UNW_FLAG_UHANDLER (2)
+mov     qword ptr [rsp+28h],rax ; _ARG_6 = &l_pHandlerData
+mov     qword ptr [rsp+20h],r12 ; _ARG_5 = &l_Context
+call    nt!RtlVirtualUnwind
+; l_pExceptionRoutine = RtlVirtualUnwind(UNW_FLAG_UHANDLER,
+;                                        l_pImageBase,
+;                                        pOriginalContext->Rip,
+;                                        l_pFunctionEntry,
+;                                        &l_Context,
+;                                        &l_pHandlerData,
+;                                        &l_pEstablisherFrame,
+;                                        NULL);
+mov     rbx,qword ptr [rsp+680h] ; rbx = l_pEstablisherFrame
+mov     rcx,rax                  ; rcx = l_pExceptionRoutine
+mov     qword ptr [rsp+48h],rax
+test    bl,7                     ; 检查 l_pEstablisherFrame 是否对齐
+jne     nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x176:
+cmp     rbx,qword ptr [rsp+50h]  ; cmp l_pEstablisherFrame, l_LowLimit
+jb      nt!RtlUnwindEx+0x184
+
+nt!RtlUnwindEx+0x17d:
+cmp     rbx,qword ptr [rsp+40h]  ; cmp l_pEstablisherFrame, l_HighLimit
+jb      nt!RtlUnwindEx+0x1d3
+
+nt!RtlUnwindEx+0x184:
+; 检查 l_pEstablisherFrame 是否合法
+mov     cl,byte ptr gs:[20DEh]   ; cl = _KPCR->DpcRoutineActive
+test    cl,cl                    ; 判断当前是否在执行 DPC
+jne     nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x194:
+mov     rcx,qword ptr [rsp+40h] ; rcx = l_HighLimit
+mov     rax,qword ptr [rcx-28h] ; rax = l_KernelStackCtrl->Previous.StackBase
+test    rax,rax                 ; 判断 l_KernelStackCtrl->Previous.StackBase 是否为 NULL
+je      nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x1a6:
+mov     rdx,qword ptr [rcx-20h]  ; rdx = l_KernelStackCtrl->Previous.StackLimit
+mov     rbx,qword ptr [rsp+680h] ; rbx = l_pEstablisherFrame
+cmp     rbx,rdx                  ; cmp l_pEstablisherFrame, l_KernelStackCtrl->Previous.StackLimit
+jb      nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x1bb:
+cmp     rbx,rax ; cmp l_pEstablisherFrame, l_KernelStackCtrl->Previous.StackBase
+jae     nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x1c4:
+mov     rcx,qword ptr [rsp+48h] ; rcx = l_pExceptionRoutine
+mov     qword ptr [rsp+50h],rdx ; l_LowLimit = l_KernelStackCtrl->Previous.StackLimit
+mov     qword ptr [rsp+40h],rax ; l_HighLimit = l_KernelStackCtrl->Previous.StackBase
+
+nt!RtlUnwindEx+0x1d3:
+test    rbp,rbp ; 判断 pEstablisherFrame 是否为 NULL
+je      nt!RtlUnwindEx+0x1e1
+
+nt!RtlUnwindEx+0x1d8:
+cmp     rbp,rbx ; cmp pEstablisherFrame, l_pEstablisherFrame
+jb      nt!RtlUnwindEx+0x431
+
+nt!RtlUnwindEx+0x1e1:
+test    rcx,rcx ; 判断 l_pExceptionRoutine 是否为 NULL
+je      nt!RtlUnwindEx+0x39b
+
+nt!RtlUnwindEx+0x1ea:
+mov     r13,qword ptr [rsp+58h] ; r13 = l_pHandlerData
+mov     qword ptr [rsp+90h],r15 ; [rsp+90] = pJumpTargetIp
+xor     r15d,r15d
+xchg    ax,ax
+xchg    ax,ax
+
+nt!RtlUnwindEx+0x200:
+cmp     rbp,rbx ; cmp pEstablisherFrame, l_pEstablisherFrame
+jne     nt!RtlUnwindEx+0x208
+
+nt!RtlUnwindEx+0x205:
+or      esi,20h ; l_ExceptionFlags |= EXCEPTION_TARGET_UNWIND (0x20)
+
+nt!RtlUnwindEx+0x208:
+mov     r10,qword ptr [rsp+690h] ; r10 = &l_ExceptionRecord
+mov     rax,qword ptr [rsp+698h] ; rax = ReturnValue
+mov     qword ptr [rsp+0A0h],rcx ; l_DispatcherContext.LanguageHandler = l_pExceptionRoutine
+mov     dword ptr [r10+4],esi    ; l_ExceptionRecord.ExceptionFlags = l_ExceptionFlags
+mov     qword ptr [rdi+78h],rax  ; pOriginalContext->Rax = ReturnValue
+mov     rax,qword ptr [rsp+68h]  ; rax = pOriginalContext->Rip
+mov     qword ptr [rsp+70h],rax  ; l_DispatcherContext.ControlPc = pOriginalContext->Rip
+mov     rax,qword ptr [rsp+60h]  ; rax = l_pImageBase
+lea     r9,[rsp+70h]             ; r9 = &l_DispatcherContext
+mov     qword ptr [rsp+78h],rax  ; l_DispatcherContext.ImageBase = l_pImageBase
+mov     rax,qword ptr [rsp+6A8h] ; rax = pHistoryTable
+mov     r8,rdi                   ; r8 = pOriginalContext
+mov     rdx,rbx                  ; rdx = l_pEstablisherFrame
+mov     rcx,r10                  ; rcx = &l_ExceptionRecord
+mov     qword ptr [rsp+80h],r14   ; l_DispatcherContext.FunctionEntry = l_pFunctionEntry
+mov     qword ptr [rsp+0B0h],rax  ; l_DispatcherContext.HistoryTable = pHistoryTable
+mov     qword ptr [rsp+88h],rbx   ; l_DispatcherContext.EstablisherFrame = l_pEstablisherFrame
+mov     qword ptr [rsp+98h],rdi   ; l_DispatcherContext.ContextRecord = pOriginalContext
+mov     qword ptr [rsp+0A8h],r13  ; l_DispatcherContext.HandlerData = l_pHandlerData
+mov     dword ptr [rsp+0B8h],r15d ; l_DispatcherContext.ScopeIndex = 0
+and     esi,0FFFFFF9Fh            ; l_ExceptionFlags &= ~(EXCEPTION_TARGET_UNWIND|EXCEPTION_COLLIDED_UNWIND)
+call    nt!RtlpExecuteHandlerForUnwind
+; RtlpExecuteHandlerForUnwind(&l_ExceptionRecord,
+;                             l_pEstablisherFrame,
+;                             pOriginalContext,
+;                             &l_DispatcherContext);
+dec     eax
+je      nt!RtlUnwindEx+0x368 ; 如果返回 ExceptionContinueSearch 则跳转
+
+nt!RtlUnwindEx+0x292:
+cmp     eax,2 ; cmp eax, ExceptionCollidedUnwind (3 - 1)
+jne     nt!RtlUnwindEx+0x426
+
+nt!RtlUnwindEx+0x29b:
+; ExceptionCollidedUnwind 的情况
+mov     r8,qword ptr [rsp+70h]   ; r8 = l_DispatcherContext.ControlPc
+mov     r10,qword ptr [rsp+78h]  ; r10 = l_DispatcherContext.ImageBase
+mov     rdx,qword ptr [rsp+98h]  ; rdx = l_DispatcherContext.ContextRecord
+mov     rcx,qword ptr [rsp+6A0h] ; rcx = pOriginalContext
+mov     r14,qword ptr [rsp+80h]  ; r14 = l_DispatcherContext.FunctionEntry
+mov     qword ptr [rsp+68h],r8
+mov     qword ptr [rsp+60h],r10
+call    nt!RtlpCopyContext
+; RtlpCopyContext(pOriginalContext, l_DispatcherContext.ContextRecord);
+mov     rdx,rcx        ; rdx = pOriginalContext
+mov     rdi,rcx        ; rdi = pOriginalContext
+lea     rcx,[rsp+160h] ; rcx = &l_Context
+lea     r12,[rsp+160h] ; r12 = &l_Context
+call    nt!RtlpCopyContext
+; RtlpCopyContext(&l_Context, pOriginalContext);
+mov     qword ptr [rsp+38h],0   ; _ARG_8 = NULL
+lea     rax,[rsp+680h]          ; rax = &l_pEstablisherFrame
+mov     qword ptr [rsp+30h],rax ; _ARG_7 = &l_pEstablisherFrame
+lea     rax,[rsp+58h]           ; rax = &l_pHandlerData
+mov     r9,r14                  ; r9 = l_DispatcherContext.FunctionEntry
+mov     qword ptr [rsp+28h],rax ; _ARG_6 = &l_pHandlerData
+lea     rax,[rsp+160h]          ; rax = &l_Context
+mov     rdx,r10                 ; rdx = l_DispatcherContext.ImageBase
+xor     ecx,ecx                 ; ecx = UNW_FLAG_NHANDLER (0)
+mov     qword ptr [rsp+20h],rax ; _ARG_5 = &l_Context
+call    nt!RtlVirtualUnwind
+; RtlVirtualUnwind(UNW_FLAG_NHANDLER,
+;                  l_DispatcherContext.ImageBase,
+;                  l_DispatcherContext.ControlPc,
+;                  l_DispatcherContext.FunctionEntry,
+;                  &l_Context,
+;                  &l_pHandlerData,
+;                  &l_pEstablisherFrame,
+;                  NULL);
+mov     rbx,qword ptr [rsp+88h]   ; rbx = l_DispatcherContext.EstablisherFrame
+mov     rcx,qword ptr [rsp+0A0h]  ; rcx = l_DispatcherContext.LanguageHandler
+mov     r13,qword ptr [rsp+0A8h]  ; r13 = l_DispatcherContext.HandlerData
+mov     rax,qword ptr [rsp+0B0h]  ; rax = l_DispatcherContext.HistoryTable
+mov     r15d,dword ptr [rsp+0B8h] ; r15d = l_DispatcherContext.ScopeIndex
+mov     qword ptr [rsp+680h],rbx  ; l_pEstablisherFrame = l_DispatcherContext.EstablisherFrame
+mov     qword ptr [rsp+48h],rcx   ; l_pExceptionRoutine = l_DispatcherContext.LanguageHandler
+mov     qword ptr [rsp+58h],r13   ; l_pHandlerData = l_DispatcherContext.HandlerData
+mov     qword ptr [rsp+6A8h],rax  ; pHistoryTable = l_DispatcherContext.HistoryTable
+or      esi,40h                   ; l_ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND (40)
+jmp     nt!RtlUnwindEx+0x382
+
+nt!RtlUnwindEx+0x368:
+cmp     rbx,rbp ; cmp l_DispatcherContext.EstablisherFrame, pEstablisherFrame
+je      nt!RtlUnwindEx+0x37d
+
+nt!RtlUnwindEx+0x36d:
+mov     rcx,qword ptr [rsp+48h] ; rcx = l_pExceptionRoutine
+mov     rax,rdi                 ; rax = pOriginalContext
+mov     rdi,r12                 ; rdi = &l_Context
+mov     r12,rax                 ; r12 = pOriginalContext
+jmp     nt!RtlUnwindEx+0x382
+
+nt!RtlUnwindEx+0x37d:
+mov     rcx,qword ptr [rsp+48h] ; rcx = l_pExceptionRoutine
+
+nt!RtlUnwindEx+0x382:
+test    sil,40h  ; test sil, EXCEPTION_COLLIDED_UNWIND (40)
+jne     nt!RtlUnwindEx+0x200
+
+nt!RtlUnwindEx+0x38c:
+mov     r13,qword ptr [rsp+68h]  ; r13 = pOriginalContext->Rip
+mov     r15,qword ptr [rsp+688h] ; r15 = pJumpTargetIp
+jmp     nt!RtlUnwindEx+0x3c7
+
+nt!RtlUnwindEx+0x39b:
+cmp     rbx,rbp  ; cmp l_DispatcherContext.EstablisherFrame, pEstablisherFrame
+je      nt!RtlUnwindEx+0x3c7
+
+nt!RtlUnwindEx+0x3a0:
+mov     rax,rdi ; rax = &l_Context
+mov     rdi,r12 ; rdi = pOriginalContext
+mov     r12,rax ; r12 = &l_Context
+jmp     nt!RtlUnwindEx+0x3c7
+
+nt!RtlUnwindEx+0x3ab:
+mov     rcx,qword ptr [rdi+98h]  ; rcx = pOriginalContext->Rsp
+mov     rax,qword ptr [rcx]      ; rax = pOriginalContext->Rsp[0]
+mov     qword ptr [rdi+0F8h],rax ; pOriginalContext->Rip = pOriginalContext->Rsp[0]
+lea     rax,[rcx+8]              ; rax = pOriginalContext->Rsp + 8
+mov     qword ptr [rdi+98h],rax  ; pOriginalContext->Rsp = pOriginalContext->Rsp + 8 （跳过返回值）
+
+nt!RtlUnwindEx+0x3c7:
+test    bl,7 ; 检查 l_DispatcherContext.EstablisherFrame 是否对齐
+jne     nt!RtlUnwindEx+0x444
+
+nt!RtlUnwindEx+0x3cc:
+cmp     rbx,qword ptr [rsp+50h] ; cmp l_DispatcherContext.EstablisherFrame, l_LowLimit
+jb      nt!RtlUnwindEx+0x3da
+
+nt!RtlUnwindEx+0x3d3:
+cmp     rbx,qword ptr [rsp+40h] ; cmp l_DispatcherContext.EstablisherFrame, l_HighLimit
+jb      nt!RtlUnwindEx+0x414
+
+nt!RtlUnwindEx+0x3da:
+mov     al,byte ptr gs:[20DEh] ; al = _KPCR->DpcRoutineActive
+test    al,al
+jne     nt!RtlUnwindEx+0x43c
+
+nt!RtlUnwindEx+0x3e6:
+mov     rcx,qword ptr [rsp+40h] ; rcx = l_HighLimit
+mov     rax,qword ptr [rcx-28h] ; rax = l_KernelStackCtrl->Previous.StackBase
+test    rax,rax
+je      nt!RtlUnwindEx+0x43c 
+
+nt!RtlUnwindEx+0x3f4:
+mov     rdx,qword ptr [rcx-20h]  ; rdx = l_KernelStackCtrl->Previous.StackLimit
+mov     rbx,qword ptr [rsp+680h] ; rbx = l_pEstablisherFrame
+cmp     rbx,rdx                  ; cmp l_pEstablisherFrame, l_KernelStackCtrl->Previous.StackLimit
+jb      nt!RtlUnwindEx+0x444
+
+nt!RtlUnwindEx+0x405:
+cmp     rbx,rax ; cmp l_pEstablisherFrame, l_KernelStackCtrl->Previous.StackBase
+jae     nt!RtlUnwindEx+0x444
+
+nt!RtlUnwindEx+0x40a:
+mov     qword ptr [rsp+50h],rdx ; l_LowLimit = l_KernelStackCtrl->Previous.StackLimit
+mov     qword ptr [rsp+40h],rax ; l_HighLimit = l_KernelStackCtrl->Previous.StackBase
+
+nt!RtlUnwindEx+0x414:
+cmp     rbx,rbp ; cmp l_pEstablisherFrame, pEstablisherFrame
+je      nt!RtlUnwindEx+0x449
+
+nt!RtlUnwindEx+0x419:
+mov     rax,qword ptr [rsp+6A8h] ; rax = pHistoryTable
+jmp     nt!RtlUnwindEx+0xf0
+
+nt!RtlUnwindEx+0x426:
+mov     ecx,0C0000026h ; ecx = STATUS_INVALID_DISPOSITION
+call    nt!RtlRaiseStatus
+int     3
+
+nt!RtlUnwindEx+0x431:
+mov     ecx,0C0000028h ; ecx = STATUS_BAD_STACK
+call    nt!RtlRaiseStatus
+int     3
+
+nt!RtlUnwindEx+0x43c:
+mov     rbx,qword ptr [rsp+680h] ; rbx = l_pEstablisherFrame
+
+nt!RtlUnwindEx+0x444:
+cmp     rbx,rbp ; cmp l_pEstablisherFrame, pEstablisherFrame
+jne     nt!RtlUnwindEx+0x479
+
+nt!RtlUnwindEx+0x449:
+mov     rax,qword ptr [rsp+698h]  ; rax = ReturnValue
+mov     rbx,qword ptr [rsp+690h]  ; rbx = pExceptionRecord
+mov     qword ptr [rdi+78h],rax   ; pOriginalContext->Rax, ReturnValue
+cmp     dword ptr [rbx],80000029h ; cmp pExceptionRecord->ExceptionCode, STATUS_UNWIND_CONSOLIDATE
+je      nt!RtlUnwindEx+0x46c
+
+nt!RtlUnwindEx+0x465:
+mov     qword ptr [rdi+0F8h],r15 ; pOriginalContext->Rip, pJumpTargetIp
+
+nt!RtlUnwindEx+0x46c:
+mov     rdx,rbx ; rdx = pExceptionRecord
+mov     rcx,rdi ; rcx = pOriginalContext
+call    nt!RtlRestoreContext
+jmp     nt!RtlUnwindEx+0x4a0
+
+nt!RtlUnwindEx+0x479:
+cmp     r13,qword ptr [rdi+0F8h] ; pOriginalContext->Rip
+jne     nt!RtlUnwindEx+0x48d
+
+nt!RtlUnwindEx+0x482:
+mov     ecx,0C00000FFh ; ecx = STATUS_BAD_FUNCTION_TABLE
+call    nt!RtlRaiseStatus
+int     3
+
+nt!RtlUnwindEx+0x48d:
+mov     rcx,qword ptr [rsp+690h] ; rcx = pExceptionRecord
+xor     r8d,r8d                  ; r8d = 0
+mov     rdx,rdi                  ; rdx = pOriginalContext
+call    nt!ZwRaiseException
+; ZwRaiseException(pExceptionRecord, pOriginalContext, FALSE);
+
+nt!RtlUnwindEx+0x4a0:
+mov     r15,qword ptr [rsp+638h]
+mov     r14,qword ptr [rsp+640h]
+mov     r13,qword ptr [rsp+648h]
+mov     r12,qword ptr [rsp+650h]
+mov     rdi,qword ptr [rsp+658h]
+mov     rsi,qword ptr [rsp+660h]
+mov     rbp,qword ptr [rsp+668h]
+mov     rbx,qword ptr [rsp+670h]
+add     rsp,678h
+ret
+{% endhighlight %}
+
+# 参考资料 #
+
+   1. wrk 源码
+   2. Improving Automated Analysis of Windows x64 Binaries, skape
+   3. Programming against the x64 exception handling support, Skywing
+   4. Exceptional Behavior - x64 Structured Exception Handling, The NT Insider
+
+
+# 版本记录 #
+
+   1. v1.0.0, 2011-11-4：最初版本。
+
+
+# 附件 #
+
+   * [SEH分析笔记（x64篇）_v1.0.0.zip](https://github.com/boxcounter/boxcounter.github.io/raw/master/attachments/SEH%E5%88%86%E6%9E%90%E7%AC%94%E8%AE%B0%EF%BC%88x64%E7%AF%87%EF%BC%89_v1.0.0.zip)
