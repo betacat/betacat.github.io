@@ -101,6 +101,9 @@ a:hover   { color: #F72105; text-decoration: underline; }
 /* .post { */
 /*     text-indent: 1cm */
 /* } */
+pre {
+  overflow-x: scroll;
+}
 
 .post pre {
   border: 0.1em solid #ddd;
