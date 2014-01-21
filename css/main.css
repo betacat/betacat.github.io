@@ -227,10 +227,9 @@ blockquote{
   /* Home
   /*
   /*****************************************************************************/
-  .posts {
-    list-style-type: none;
-    margin-bottom: 2em;
-    font-size: 0.8em;
+  .posts {    
+    margin-bottom: 1.5em;
+    font-size: 0.87em;
     padding-left: 8px;
   }
 
@@ -241,7 +240,7 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
-    font-size: 0.8em;
+    font-size: 0.87em;
   }
 
   .category ul {
