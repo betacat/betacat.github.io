@@ -205,11 +205,11 @@ blockquote{
 
 @media only screen and (max-width: 480px) {
   h1 {
-    font-size: 1.5em; 
+    font-size: 1.25em; 
   }
 
   h2 {
-    font-size: 1.23em;
+    font-size: 1em;
   }
   
   /*****************************************************************************/
@@ -220,7 +220,7 @@ blockquote{
   .posts {
     list-style-type: none;
     margin-bottom: 2em;
-    font-size: 1.25em;
+    font-size: 1.2em;
   }
 
   .posts li {
@@ -230,7 +230,61 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
+    font-size: 1.2em;
+  }
+
+  /*****************************************************************************/
+  /*
+  /* Site
+  /*
+  /*****************************************************************************/
+
+  .site {
+    font-size: 14px;
+    width: 94%;
+    margin: auto;
+    margin-top: 2em;
+  }
+
+  .header a {
+    text-decoration: none;
+  }
+
+  .title {
     font-size: 1.25em;
+  }
+
+  .title a {
+    color: #a00;
+  }
+
+  .title a:hover {
+    color: #000;
+  }
+
+  .header a.extra {
+    color: #aaa;
+    margin-left: 1em;
+  }
+
+  .header a.extra:hover {
+    color: #000;
+  }
+
+  .meta {
+    color: #aaa;
+  }
+
+  .footer {
+    font-size: 0.875em;
+    color: #666;
+    border-top: 4px solid #eee;
+    margin-top: 2em;
+    overflow: hidden;
+  }
+
+  .to_top {
+      float: right;
   }
 
 }
