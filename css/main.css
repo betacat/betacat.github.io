@@ -118,8 +118,7 @@ pre {
 }
 
 .post ul, .post ol {
-  margin-left: 1.35em;
-  overflow-x: auto;
+  margin-left: 1.35em;  
 }
 
 .post code {
@@ -251,39 +250,14 @@ blockquote{
 
   .site {
     font-size: 14px;
-    width: 94%;
+    width: 90%;
     margin: auto;
     margin-top: 2em;
   }
-
-  .header a {
-    text-decoration: none;
-  }
-
+  
   .title {
     font-size: 1.25em;
-  }
-
-  .title a {
-    color: #a00;
-  }
-
-  .title a:hover {
-    color: #000;
-  }
-
-  .header a.extra {
-    color: #aaa;
-    margin-left: 1em;
-  }
-
-  .header a.extra:hover {
-    color: #000;
-  }
-
-  .meta {
-    color: #aaa;
-  }
+  } 
 
   .footer {
     font-size: 0.875em;
@@ -293,8 +267,22 @@ blockquote{
     overflow: hidden;
   }
 
-  .to_top {
-      float: right;
+  pre {
+    _width: 95%; /*IE6 定宽*/
+    *padding-bottom: 14px;  /* XP下滚动条高度约14px */
+    *overflow-y: hidden;    /* 隐藏纵向滚动条 */  
+  }
+
+  .post pre {
+    padding: 5px;
+    border: 0.1em solid #ddd;
+    background-color: #eef;
+    padding: 0 .4em;
+    overflow-x: auto;
+  }
+
+  .post ul, .post ol {
+    margin-left: 1em;  
   }
 
 }
