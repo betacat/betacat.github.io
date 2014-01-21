@@ -231,7 +231,7 @@ blockquote{
     list-style-type: none;
     margin-bottom: 2em;
     font-size: 0.8em;
-    padding-left: 0px;
+    padding-left: 3px;
   }
 
   .posts li {
@@ -243,6 +243,16 @@ blockquote{
     font-family: Monaco, "Courier New", monospace;
     font-size: 0.8em;
   }
+
+  .category ul {
+    list-style: none;
+    padding-left: 3px;
+  }
+
+  .link {
+  list-style: none;
+  padding-left: 3px;
+}
 
   /*****************************************************************************/
   /*
