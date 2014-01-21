@@ -249,14 +249,14 @@ blockquote{
   /*****************************************************************************/
 
   .site {
-    font-size: 14px;
+    font-size: 0.8em;
     width: 90%;
     margin: auto;
     margin-top: 2em;
   }
   
   .title {
-    font-size: 1.25em;
+    font-size: 1em;
   } 
 
   .footer {
