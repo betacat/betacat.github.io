@@ -214,11 +214,11 @@ blockquote{
 
 @media only screen and (max-width: 480px) {
   h1 {
-    font-size: 1.2em; 
+    font-size: 1em; 
   }
 
   h2 {
-    font-size: 1em;
+    font-size: 0.8em;
   }
   
   /*****************************************************************************/
@@ -229,7 +229,7 @@ blockquote{
   .posts {
     list-style-type: none;
     margin-bottom: 2em;
-    font-size: 1em;
+    font-size: 0.8em;
   }
 
   .posts li {
@@ -239,7 +239,7 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
-    font-size: 1em;
+    font-size: 0.8em;
   }
 
   /*****************************************************************************/
