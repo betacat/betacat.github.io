@@ -79,14 +79,6 @@ a:hover   { color: #F72105; text-decoration: underline; }
   color: #aaa;
 }
 
-.footer {
-  font-size: 80%;
-  color: #666;
-  border-top: 4px solid #eee;
-  margin-top: 2em;
-  overflow: hidden;
-}
-
 .to_top {
     float: right;
 }
@@ -95,12 +87,6 @@ a:hover   { color: #F72105; text-decoration: underline; }
 /* Posts
 /*
 /*****************************************************************************/
-
-/* standard */
-/* .post { */
-/*     text-indent: 1cm */
-/* } */
-
 
 pre {
   _width: 95%; /*IE6 定宽*/
@@ -123,7 +109,6 @@ pre {
 .post code {
   border: 0.1em solid #ddd;
   background-color: #eef;  
-  /*padding: 0 .2em;*/
 }
 
 .post pre code {
@@ -209,7 +194,7 @@ blockquote{
   }
 
   h2 {
-    font-size: 1.23em;
+    font-size: 1.25em;
   }
 }
 
@@ -229,7 +214,7 @@ blockquote{
   /*****************************************************************************/
   .posts {    
     margin-bottom: 1.5em;
-    font-size: 0.87em;
+    font-size: 0.8em;
     padding-left: 8px;
   }
 
@@ -240,7 +225,7 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
-    font-size: 0.87em;
+    font-size: 0.8em;
   }
 
   .category ul {
@@ -249,10 +234,10 @@ blockquote{
   }
 
   .link {
-  list-style: none;
-  padding-left: 8px;
-  font-size: 0.87em;
-}
+    list-style: none;
+    padding-left: 8px;
+    font-size: 0.8em;
+  }
 
   /*****************************************************************************/
   /*
@@ -261,7 +246,7 @@ blockquote{
   /*****************************************************************************/
 
   .site {
-    font-size: 0.87em;
+    font-size: 0.8em;
     width: 90%;
     margin: auto;
     margin-top: 2em;
@@ -269,21 +254,7 @@ blockquote{
   
   .title {
     font-size: 1em;
-  } 
-
-  .footer {
-    font-size: 0.875em;
-    color: #666;
-    border-top: 4px solid #eee;
-    margin-top: 2em;
-    overflow: hidden;
-  }
-
-  pre {
-    _width: 95%; /*IE6 定宽*/
-    *padding-bottom: 14px;  /* XP下滚动条高度约14px */
-    *overflow-y: hidden;    /* 隐藏纵向滚动条 */  
-  }
+  }  
 
   .post{
     width: 90%;
@@ -293,13 +264,12 @@ blockquote{
   .post pre {
     padding: 5px;
     border: 0.1em solid #ddd;
-    background-color: #eef;
-    padding: 0 .4em;
+    background-color: #eef;    
     overflow-x: auto;
   }
 
   .post ul, .post ol {
-    margin-left: 1em;  
+    margin-left: 0.8em;  
   }
 
 }
