@@ -101,28 +101,31 @@ a:hover   { color: #F72105; text-decoration: underline; }
 /* .post { */
 /*     text-indent: 1cm */
 /* } */
+
+
 pre {
   _width: 95%; /*IE6 定宽*/
   *padding-bottom: 14px;  /* XP下滚动条高度约14px */
-  *overflow-y: hidden;    /* 隐藏纵向滚动条 */
-
-  overflow-x: auto;
+  *overflow-y: hidden;    /* 隐藏纵向滚动条 */  
 }
 
 .post pre {
+  padding: 5px;
   border: 0.1em solid #ddd;
   background-color: #eef;
   padding: 0 .4em;
+  overflow-x: auto;
 }
 
 .post ul, .post ol {
   margin-left: 1.35em;
+  overflow-x: auto;
 }
 
 .post code {
   border: 0.1em solid #ddd;
-  background-color: #eef;
-  padding: 0 .2em;
+  background-color: #eef;  
+  /*padding: 0 .2em;*/
 }
 
 .post pre code {
