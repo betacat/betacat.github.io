@@ -186,3 +186,51 @@ blockquote{
   border-top: 0.1em dashed #cccccc;
   overflow: hidden
 }
+
+/*****************************************************************************/
+/*
+/* 自适应
+/*
+/*****************************************************************************/
+
+@media only screen and (max-width: 760px) {  
+  h1 {
+    font-size: 1.5em; 
+  }
+
+  h2 {
+    font-size: 1.23em;
+  }
+}
+
+@media only screen and (max-width: 480px) {
+  h1 {
+    font-size: 1.5em; 
+  }
+
+  h2 {
+    font-size: 1.23em;
+  }
+  
+  /*****************************************************************************/
+  /*
+  /* Home
+  /*
+  /*****************************************************************************/
+  .posts {
+    list-style-type: none;
+    margin-bottom: 2em;
+    font-size: 1.25em;
+  }
+
+  .posts li {
+    line-height: 1.4em;
+  }
+
+  .posts span {
+    color: #aaa;
+    font-family: Monaco, "Courier New", monospace;
+    font-size: 1.25em;
+  }
+
+}
