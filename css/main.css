@@ -190,11 +190,7 @@ blockquote{
 
 @media only screen and (max-width: 760px) {  
   h1 {
-    font-size: 1.5em; 
-  }
-
-  h2 {
-    font-size: 1.25em;
+    font-size: 1.25em; 
   }
   
   /*****************************************************************************/
@@ -204,7 +200,7 @@ blockquote{
   /*****************************************************************************/
   .posts {    
     margin-bottom: 1.5em;
-    font-size: 1em;
+    font-size: 0.875em;
     padding-left: 10px;
   }
 
@@ -215,7 +211,7 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
-    font-size: 1em;
+    font-size: 0.875em;
   }
 
   .category ul {
@@ -226,7 +222,7 @@ blockquote{
   .link {
     list-style: none;
     padding-left: 10px;
-    font-size: 1em;
+    font-size: 0.875em;
   }
 
   /*****************************************************************************/
