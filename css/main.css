@@ -190,9 +190,9 @@ blockquote{
 }
 
 
-/* dasshed line */
-.dashed-line {
-  border-top: 0.1em dashed #cccccc;
+/* toc */
+.toc {
+  border-bottom: 0.1em dashed #cccccc;
   overflow: hidden
 }
 
@@ -273,6 +273,10 @@ blockquote{
     *overflow-y: hidden;    /* 隐藏纵向滚动条 */  
   }
 
+  .post{
+    width: 90%;
+  }
+  
   .post pre {
     padding: 5px;
     border: 0.1em solid #ddd;

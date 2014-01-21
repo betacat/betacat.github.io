@@ -8,14 +8,10 @@ layout: default
 <p class="meta">{{ page.date | date:"%Y-%m-%d" }}</p>
 
 <div class="post">
-
-{% include toc.html %}
-<div class="dashed-line"></div>
-
-{{ content }}
-
-<br/>
-<hr/>
-<br/>
+	{% include toc.html %}
+	{{ content }}
+	<br/>
+	<hr/>
+	<br/>
 </div>
 {% include disqus_comment.html  %}
