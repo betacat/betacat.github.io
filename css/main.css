@@ -196,6 +196,71 @@ blockquote{
   h2 {
     font-size: 1.25em;
   }
+  
+  /*****************************************************************************/
+  /*
+  /* Home
+  /*
+  /*****************************************************************************/
+  .posts {    
+    margin-bottom: 1.5em;
+    font-size: 1em;
+    padding-left: 10px;
+  }
+
+  .posts li {
+    line-height: 1.7em;
+  }
+
+  .posts span {
+    color: #aaa;
+    font-family: Monaco, "Courier New", monospace;
+    font-size: 1em;
+  }
+
+  .category ul {
+    list-style: none;
+    padding-left: 10px;
+  }
+
+  .link {
+    list-style: none;
+    padding-left: 10px;
+    font-size: 1em;
+  }
+
+  /*****************************************************************************/
+  /*
+  /* Site
+  /*
+  /*****************************************************************************/
+
+  .site {
+    font-size: 1em;
+    width: 90%;
+    margin: auto;
+    margin-top: 2em;
+  }
+  
+  .title {
+    font-size: 1.5em;
+  }  
+
+  .post{
+    width: 90%;
+    margin: auto;
+  }
+
+  .post pre {
+    padding: 5px;
+    border: 0.1em solid #ddd;
+    background-color: #eef;    
+    overflow-x: auto;
+  }
+
+  .post ul, .post ol {
+    margin-left: 1em;  
+  }
 }
 
 @media only screen and (max-width: 480px) {
