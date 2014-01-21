@@ -25,7 +25,8 @@ a:hover   { color: #F72105; text-decoration: underline; }
 /*****************************************************************************/
 .posts {
   list-style-type: none;
-  margin-bottom: 2em;
+  
+
 }
 
 .posts li {
@@ -230,6 +231,7 @@ blockquote{
     list-style-type: none;
     margin-bottom: 2em;
     font-size: 0.8em;
+    padding-left: 0px;
   }
 
   .posts li {
@@ -276,7 +278,7 @@ blockquote{
   .post{
     width: 90%;
   }
-  
+
   .post pre {
     padding: 5px;
     border: 0.1em solid #ddd;
