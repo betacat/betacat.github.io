@@ -192,7 +192,7 @@ blockquote{
   h1 {
     font-size: 1.25em; 
   }
-  
+
   /*****************************************************************************/
   /*
   /* Home
@@ -200,7 +200,7 @@ blockquote{
   /*****************************************************************************/
   .posts {    
     margin-bottom: 1.5em;
-    font-size: 0.875em;
+    font-size: 0.9em;
     padding-left: 10px;
   }
 
@@ -211,7 +211,7 @@ blockquote{
   .posts span {
     color: #aaa;
     font-family: Monaco, "Courier New", monospace;
-    font-size: 0.875em;
+    font-size: 0.9em;
   }
 
   .category ul {
@@ -222,7 +222,7 @@ blockquote{
   .link {
     list-style: none;
     padding-left: 10px;
-    font-size: 0.875em;
+    font-size: 0.9em;
   }
 
   /*****************************************************************************/
