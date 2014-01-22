@@ -282,8 +282,8 @@ blockquote{
   .right {
     width: 50%;
     float: right;
-    padding-top: 8px;
-    background-color: red;
+    padding-top: 15px;
+    background-color: blue;
   }
 }
 
