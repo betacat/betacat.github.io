@@ -342,8 +342,8 @@ blockquote{
   }
 
   .imgRss img{
-    margin-left: 15px;
-    width: 12px;
+    margin-left: 0.75em;
+    width: 0.75em;
     height: auto;
   }
 }
