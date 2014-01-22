@@ -368,8 +368,8 @@ blockquote{
   .right {
     width: 55%;
     float: right;
-    /*padding-top: 30px;*/
-    background-color: red;
+    padding-top: 5px;
+    background-color: yellow;
   }
 
   /*.right img {
