@@ -342,6 +342,7 @@ blockquote{
   }
 
   .imgRss img{
+    margin-left: 20px;
     width: 10px;
     height: auto;
   }
