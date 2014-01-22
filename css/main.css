@@ -59,12 +59,12 @@ a:hover   { color: #F72105; text-decoration: underline; }
 }
 
 .left {
-  width: 35%;
+  width: 30%;
   float: left;
 }
 
 .right {
-  width: 65%;
+  width: 70%;
   float: right;
   padding-top: 30px;
 }
@@ -283,6 +283,7 @@ blockquote{
     width: 50%;
     float: right;
     padding-top: 8px;
+    background-color: red;
   }
 }
 
@@ -362,20 +363,12 @@ blockquote{
 
   .left {
     width: 45%;
-    float: left;
-    background-color: blue;
+    float: left;    
   }
 
   .right {
     width: 55%;
     float: right;
-    padding-top: 5px;
-    background-color: yellow;
+    padding-top: 5px;    
   }
-
-  .right img {
-    width: 10%;
-    height: auto;
-  }
-
 }
