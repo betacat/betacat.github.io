@@ -14,6 +14,10 @@ body {
 h1, h2, h3, h4, h5, h6 {
   font-size: 120%; }
 
+.clear {
+  clear: both;
+}
+
 a         { color: #00a; text-decoration: none; }
 a:visited { color: #a0a; text-decoration: none; }
 a:hover   { color: #F72105; text-decoration: underline; }
@@ -51,11 +55,23 @@ a:hover   { color: #F72105; text-decoration: underline; }
 }
 
 .header a {
-  text-decoration: none;
+  text-decoration: none;  
 }
 
+.left {
+  width: 28%;
+  float: left;
+}
+
+.right {
+  width: 72%;
+  float: right;
+  padding-top: 30px;
+}
+
+
 .title {
-  font-size: 180%;
+  font-size: 180%;  
 }
 
 .title a {
