@@ -340,4 +340,9 @@ blockquote{
   .post ul, .post ol {
     margin-left: 0.8em;  
   }
+
+  .imgRss img{
+    width: 3px;
+    height: 3px;
+  }
 }
