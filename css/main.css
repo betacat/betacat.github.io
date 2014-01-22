@@ -275,12 +275,12 @@ blockquote{
   }
 
   .left {
-    width: 35%;
+    width: 50%;
     float: left;
   }
 
   .right {
-    width: 65%;
+    width: 50%;
     float: right;
     padding-top: 30px;
   }
@@ -361,12 +361,12 @@ blockquote{
   }
 
   .left {
-    width: 35%;
+    width: 45%;
     float: left;
   }
 
   .right {
-    width: 65%;
+    width: 55%;
     float: right;
     /*padding-top: 30px;*/
     background-color: red;
