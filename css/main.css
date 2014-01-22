@@ -59,7 +59,7 @@ a:hover   { color: #F72105; text-decoration: underline; }
 }
 
 .imgRss{
-  margin-left: 20px;
+  margin-left: 25px;
 }
 
 .title {
@@ -265,17 +265,6 @@ blockquote{
   .post ul, .post ol {
     margin-left: 1em;  
   }
-
-  .left {
-    width: 50%;
-    float: left;
-  }
-
-  .right {
-    width: 50%;
-    float: right;
-    padding-top: 18px;    
-  }
 }
 
 @media only screen and (max-width: 480px) {
@@ -350,16 +339,5 @@ blockquote{
 
   .post ul, .post ol {
     margin-left: 0.8em;  
-  }
-
-  .left {
-    width: 45%;
-    float: left;    
-  }
-
-  .right {
-    width: 55%;
-    float: right;
-    padding-top: 5px;    
   }
 }
