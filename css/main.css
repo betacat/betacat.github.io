@@ -273,6 +273,17 @@ blockquote{
   .post ul, .post ol {
     margin-left: 1em;  
   }
+
+  .left {
+    width: 35%;
+    float: left;
+  }
+
+  .right {
+    width: 65%;
+    float: right;
+    padding-top: 30px;
+  }
 }
 
 @media only screen and (max-width: 480px) {
@@ -347,6 +358,17 @@ blockquote{
 
   .post ul, .post ol {
     margin-left: 0.8em;  
+  }
+
+  .left {
+    width: 35%;
+    float: left;
+  }
+
+  .right {
+    width: 65%;
+    float: right;
+    padding-top: 30px;
   }
 
 }
