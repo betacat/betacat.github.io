@@ -368,7 +368,7 @@ blockquote{
   .right {
     width: 65%;
     float: right;
-    padding-top: 30px;
+    /*padding-top: 30px;*/
     background-color: red;
   }
 
