@@ -363,6 +363,7 @@ blockquote{
   .left {
     width: 45%;
     float: left;
+    background-color: blue;
   }
 
   .right {
