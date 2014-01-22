@@ -58,17 +58,9 @@ a:hover   { color: #F72105; text-decoration: underline; }
   text-decoration: none;  
 }
 
-.left {
-  width: 30%;
-  float: left;
+.imgRss{
+  margin-left: 20px;
 }
-
-.right {
-  width: 70%;
-  float: right;
-  padding-top: 30px;
-}
-
 
 .title {
   font-size: 180%;  

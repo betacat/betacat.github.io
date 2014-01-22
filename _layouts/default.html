@@ -19,11 +19,9 @@
 
         <div class="site">
           <div class="header">
-            <div class="left"><h1 class="title"><a href="/">{{ site.name }}</a></h1></div>
-            <div class="right"><a href="/rss.xml"><img src="/images/rss.png" alt="rss" title="订阅" /></a></div>  
-            <div class="clear"></div>        
-          </div>
 
+            <h1 class="title"><a href="/">{{ site.name }}</a><span  class="imgRss"><a href="/rss.xml"><img src="/images/rss.png" alt="rss" title="订阅" /></a></span></h1>
+          </div>
           <div class="category">
             <ul>
               <li><a href="/categories/archive.html">所有({{ site.posts | size }})</a></li>
